@@ -487,7 +487,7 @@ Touch-off workflow documentation:
 
 Known limitations after Phase 4:
 
-- Tool data is fixed-size and in-memory only; persistent storage/UI editing remains future work.
+- Tool data is fixed-size and now persisted in NVS through the firmware API; operator-facing UI editing remains future work.
 - There is no G-code syntax yet for writing lathe tool table entries directly from a program.
 - Front/rear turret semantics are represented only by insert orientation at this stage.
 - Basic `G7`/`G8` diameter/radius programming is implemented for X words by converting programmed diameter values into internal machine-radius coordinates before normal offset/planner handling; hardware/CAM validation is still required.
@@ -599,7 +599,7 @@ Known limitations after Phase 5:
 - Cycle helpers are not yet wired to parser-level canned-cycle G-code execution. This is intentional until encoder-backed threading and persistent tool tables are validated on hardware.
 - `G76` syntax compatibility, roughing-cycle dialect choices, grooving, peck drilling, and WebUI editing remain future work.
 - Fixture programs document expanded lower-level motion rather than executing a new canned-cycle parser command.
-- Complete diameter/radius behavior now covers basic X-word programming and CSS diameter conversion, but operator touch-off screens and persistent tool-table editing still need to use the same diameter-to-radius helper before first-class release.
+- Complete diameter/radius behavior now covers basic X-word programming and CSS diameter conversion, but operator touch-off screens and WebUI tool-table editing still need to use the same diameter-to-radius helper before first-class release.
 
 ### Phase 5 exit checklist
 

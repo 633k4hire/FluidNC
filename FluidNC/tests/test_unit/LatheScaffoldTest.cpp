@@ -83,6 +83,8 @@ TEST(LatheScaffold, XDiameterProgrammingConvertsToInternalRadiusCoordinates) {
 }
 
 TEST(LatheScaffold, LatheToolDataStoresGeometryWearNoseAndOrientation) {
+    Lathe::clear_tool_table(false);
+
     Lathe::ToolData tool;
     tool.geometry_x_mm  = 1.0f;
     tool.geometry_z_mm  = 2.0f;
@@ -105,6 +107,17 @@ TEST(LatheScaffold, LatheToolDataStoresGeometryWearNoseAndOrientation) {
     EXPECT_FLOAT_EQ(active.x_mm, 1.1f);
     EXPECT_FLOAT_EQ(active.z_mm, 1.8f);
     EXPECT_FLOAT_EQ(active.nose_radius_mm, 0.4f);
+}
+
+TEST(LatheScaffold, LatheToolTableCanBeClearedWithoutPersisting) {
+    Lathe::ToolData tool;
+    tool.geometry_x_mm = 3.0f;
+
+    Lathe::set_tool_data(9, tool);
+    ASSERT_TRUE(Lathe::get_tool_data(9).has_value());
+
+    Lathe::clear_tool_table(false);
+    EXPECT_FALSE(Lathe::get_tool_data(9).has_value());
 }
 
 TEST(LatheScaffold, ThreadingCycleExpandsIntoThreadingPassesAndRetracts) {

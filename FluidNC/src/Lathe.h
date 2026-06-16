@@ -146,6 +146,9 @@ namespace Lathe {
     float x_offset_to_machine_mm(float x_offset, DiameterMode mode);
     float x_program_to_machine_mm(float x_programmed, DiameterMode mode);
     float x_machine_to_diameter_mm(float x_machine);
+    bool load_tool_table();
+    bool save_tool_table();
+    void clear_tool_table(bool persist);
     void set_tool_data(uint32_t tool_number, const ToolData& data);
     std::optional<ToolData> get_tool_data(uint32_t tool_number);
     ActiveToolOffset select_tool(uint32_t tool_number);

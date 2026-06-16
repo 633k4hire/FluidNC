@@ -54,9 +54,9 @@ G1 X24.000 Z-5.000 F100   ; X is 24 mm diameter, planned as 12 mm radius
 
 CSS calculations use the inverse conversion: the internal machine-radius X coordinate is doubled back to cutting diameter before `G96` RPM math is applied. This keeps `G96` behavior consistent whether a program is written in `G7` or `G8`.
 
-## Tool offsets
+## Tool offsets and persistence
 
-Lathe tool data is currently a fixed-size in-memory model. Each entry stores:
+Lathe tool data is a fixed-size table persisted in ESP32 NVS under the `LatheTools` blob key. Each entry stores:
 
 - X/Z geometry offsets;
 - X/Z wear offsets;
@@ -64,6 +64,8 @@ Lathe tool data is currently a fixed-size in-memory model. Each entry stores:
 - insert orientation.
 
 The active X/Z lathe offset is applied through the existing TLO vector on `M6` and `M61` while lathe mode is enabled. Tool geometry and wear are summed only when a tool becomes active. X offsets are stored as machine-radius millimeters; diameter-mode touch-off workflows must convert diameter values to radius before storage.
+
+Firmware APIs now load the table lazily from NVS, save it whenever `Lathe::set_tool_data()` changes a slot, and provide `Lathe::clear_tool_table(true)` for clearing the persisted table. The first-class operator UI still needs an editing/touch-off screen, but the firmware storage layer no longer loses tool data on reboot.
 
 ## WebUI/API support
 
@@ -92,6 +94,6 @@ If a future .NET 8 Blazor WebUI consumes the lathe endpoint, do not put C# lambd
 
 ## Current limitations
 
-- Tool data is not persisted across reboot yet.
+- Operator-facing touch-off and tool-table editing screens are not complete yet; current persistence is exposed at the firmware API layer.
 - Parser-level canned cycle execution is not wired yet; current cycle helpers produce validated lower-level move plans.
 - Encoder hardware backends still need to implement the spindle feedback contract before threading can be used on real hardware.

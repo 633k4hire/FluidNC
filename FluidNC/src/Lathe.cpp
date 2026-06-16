@@ -5,6 +5,8 @@
 
 #include "Machine/MachineConfig.h"
 #include "Logging.h"
+#include "Protocol.h"
+#include "Settings.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,8 +20,21 @@ namespace Lathe {
         };
 
         constexpr size_t MaxLatheTools = 32;
+        constexpr const char* ToolTableNvsKey = "LatheTools";
         std::array<ToolSlot, MaxLatheTools> tool_table;
         ActiveToolOffset active_offset;
+        bool tool_table_loaded = false;
+
+        void reset_tool_table() {
+            tool_table = {};
+            active_offset = {};
+        }
+
+        void ensure_tool_table_loaded() {
+            if (!tool_table_loaded) {
+                load_tool_table();
+            }
+        }
     }
 
     bool enabled() {
@@ -128,13 +143,46 @@ namespace Lathe {
         return std::fabs(x_machine) * 2.0f;
     }
 
+    bool load_tool_table() {
+        reset_tool_table();
+        tool_table_loaded = true;
+
+        size_t len = sizeof(tool_table);
+        if (nvs.get_blob(ToolTableNvsKey, tool_table.data(), &len) || len != sizeof(tool_table)) {
+            reset_tool_table();
+            return false;
+        }
+        return true;
+    }
+
+    bool save_tool_table() {
+        ensure_tool_table_loaded();
+        if (FORCE_BUFFER_SYNC_DURING_NVS_WRITE) {
+            protocol_buffer_synchronize();
+        }
+        return !nvs.set_blob(ToolTableNvsKey, tool_table.data(), sizeof(tool_table));
+    }
+
+    void clear_tool_table(bool persist) {
+        reset_tool_table();
+        tool_table_loaded = true;
+        if (persist) {
+            if (FORCE_BUFFER_SYNC_DURING_NVS_WRITE) {
+                protocol_buffer_synchronize();
+            }
+            nvs.erase_key(ToolTableNvsKey);
+        }
+    }
+
     void set_tool_data(uint32_t tool_number, const ToolData& data) {
+        ensure_tool_table_loaded();
         ToolData stored = data;
         stored.valid    = true;
 
         for (auto& slot : tool_table) {
             if (slot.data.valid && slot.tool_number == tool_number) {
                 slot.data = stored;
+                save_tool_table();
                 return;
             }
         }
@@ -143,6 +191,7 @@ namespace Lathe {
             if (!slot.data.valid) {
                 slot.tool_number = tool_number;
                 slot.data        = stored;
+                save_tool_table();
                 return;
             }
         }
@@ -150,9 +199,11 @@ namespace Lathe {
         // Fixed-size first release: replace the last slot rather than allocating dynamically.
         tool_table.back().tool_number = tool_number;
         tool_table.back().data        = stored;
+        save_tool_table();
     }
 
     std::optional<ToolData> get_tool_data(uint32_t tool_number) {
+        ensure_tool_table_loaded();
         for (const auto& slot : tool_table) {
             if (slot.data.valid && slot.tool_number == tool_number) {
                 return slot.data;
@@ -162,6 +213,7 @@ namespace Lathe {
     }
 
     ActiveToolOffset select_tool(uint32_t tool_number) {
+        ensure_tool_table_loaded();
         active_offset = {};
         active_offset.tool_number = tool_number;
 
