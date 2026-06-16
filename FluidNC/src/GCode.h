@@ -8,6 +8,7 @@
 #include "Config.h"
 #include "Error.h"
 #include "SpindleDatatypes.h"
+#include "Lathe.h"
 
 #include <cstdint>
 #include <optional>
@@ -34,20 +35,21 @@ enum class ModalGroup : uint8_t {
     MG2  = 2,   // [G17,G18,G19] Plane selection
     MG3  = 3,   // [G90,G91] Distance mode
     MG4  = 4,   // [G91.1] Arc IJK distance mode
-    MG5  = 5,   // [G93,G94] Feed rate mode
+    MG5  = 5,   // [G93,G94,G95] Feed rate mode
     MG6  = 6,   // [G20,G21] Units
     MG7  = 7,   // [G40] Cutter radius compensation mode. G41/42 NOT SUPPORTED.
     MG8  = 8,   // [G43.1,G49] Tool length offset
     MG12 = 9,   // [G54,G55,G56,G57,G58,G59] Coordinate system selection
     MG13 = 10,  // [G61] Control mode
+    MG14 = 11,  // [G96,G97] Lathe spindle speed mode
     // Table 6. M-code Modal Groups
-    MM4  = 11,  // [M0,M1,M2,M30] Stopping
-    MM5  = 12,  // [M62,M63,M64,M65,M66,M67,M68] Digital/analog output/input
-    MM6  = 13,  // [M6] [M61] Tool change
-    MM7  = 14,  // [M3,M4,M5] Spindle turning
-    MM8  = 15,  // [M7,M8,M9] Coolant control
-    MM9  = 16,  // [M56] Override control
-    MM10 = 17,  // [M100-M199] User Defined
+    MM4  = 12,  // [M0,M1,M2,M30] Stopping
+    MM5  = 13,  // [M62,M63,M64,M65,M66,M67,M68] Digital/analog output/input
+    MM6  = 14,  // [M6] [M61] Tool change
+    MM7  = 15,  // [M3,M4,M5] Spindle turning
+    MM8  = 16,  // [M7,M8,M9] Coolant control
+    MM9  = 17,  // [M56] Override control
+    MM10 = 18,  // [M100-M199] User Defined
 };
 
 // Command actions for within execution-type modal groups (motion, stopping, non-modal). Used
@@ -78,6 +80,7 @@ enum class Motion : gcodenum_t {
     Linear             = 10,   // G1
     CwArc              = 20,   // G2
     CcwArc             = 30,   // G3
+    Threading          = 330,  // G32/G33 lathe synchronized threading primitive
     ProbeToward        = 382,  // G38.2
     ProbeTowardNoError = 383,  // G38.3
     ProbeAway          = 384,  // G38.4
@@ -117,6 +120,7 @@ enum class ProgramFlow : uint8_t {
 enum class FeedRate : gcodenum_t {
     UnitsPerMin = 940,  // G94 Default
     InverseTime = 930,  // G93
+    UnitsPerRev = 950,  // G95 lathe feed per revolution
 };
 
 // Modal Group G6: Units mode
@@ -262,7 +266,7 @@ CoordIndex& operator++(CoordIndex& i);
 // NOTE: When this struct is zeroed, the 0 values in the above types set the system defaults.
 struct gc_modal_t {
     Motion   motion;     // {G0,G1,G2,G3,G38.2,G80}
-    FeedRate feed_rate;  // {G93,G94}
+    FeedRate feed_rate;  // {G93,G94,G95}
     Units    units;      // {G20,G21}
     Distance distance;   // {G90,G91}
     // ArcDistance distance_arc; // {G91.1} NOTE: Don't track. Only default supported.
@@ -278,6 +282,8 @@ struct gc_modal_t {
     SetToolNumber set_tool_number;
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}
+    Lathe::SpindleSpeedMode lathe_spindle_speed_mode;  // {G96,G97}
+    Lathe::DiameterMode     lathe_diameter_mode;       // {G7,G8} scaffold only
 };
 
 struct gc_values_t {
@@ -298,8 +304,9 @@ struct gc_values_t {
 struct parser_state_t {
     gc_modal_t modal;
 
-    float    spindle_speed;  // RPM
-    float    feed_rate;      // Millimeters/min
+    float    spindle_speed;          // RPM, or surface speed while G96 CSS is active
+    float    lathe_commanded_rpm;     // Effective RPM after CSS conversion/clamping
+    float    feed_rate;              // Millimeters/min
     uint32_t selected_tool;  // tool from T value
     int32_t  current_tool;   // the tool in use. default is -1
     int32_t  line_number;    // Last line number sent

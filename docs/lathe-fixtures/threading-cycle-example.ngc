@@ -1,0 +1,11 @@
+(FluidNC lathe Phase 5 threading-cycle fixture)
+(Example assumes lathe mode, encoder feedback, G95, and configured CSS clamp are available.)
+G21 G18 G90 G95
+G97 S600 M3
+T1 M6
+(Expanded G76-style plan produced by Lathe::build_threading_cycle:)
+( pass 1: G33 X19.0 Z-10.0 F1.5 )
+( rapid return: G0 X20.0 Z0.0 )
+( pass 2: G33 X18.0 Z-10.0 F1.5 )
+M5
+M30

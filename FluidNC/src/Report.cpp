@@ -26,6 +26,7 @@
 #include "WebUI/NotificationsService.h"  // WebUI::notificationsService
 #include "InputFile.h"
 #include "Job.h"
+#include "Lathe.h"
 
 #include <map>
 #include <freertos/task.h>
@@ -238,6 +239,9 @@ void report_gcode_modes(Channel& channel) {
         case Motion::CcwArc:
             msg << "G3";
             break;
+        case Motion::Threading:
+            msg << "G33";
+            break;
         case Motion::ProbeToward:
             msg << "G38.2";
             break;
@@ -304,6 +308,9 @@ void report_gcode_modes(Channel& channel) {
         case FeedRate::InverseTime:
             msg << " G93";
             break;
+        case FeedRate::UnitsPerRev:
+            msg << " G95";
+            break;
     }
 
     //report_util_gcode_modes_M();
@@ -355,6 +362,15 @@ void report_gcode_modes(Channel& channel) {
 
     if (config->_enableParkingOverrideControl && sys.override_ctrl() == Override::ParkingMotion) {
         msg << " M56";
+    }
+
+    if (Lathe::enabled()) {
+        msg << (gc_state.modal.lathe_spindle_speed_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed ? " G96" : " G97");
+        msg << (gc_state.modal.lathe_diameter_mode == Lathe::DiameterMode::Diameter ? " G7" : " G8");
+        const auto lathe_tool = Lathe::active_tool_offset();
+        if (lathe_tool.valid) {
+            msg << " LT" << lathe_tool.tool_number << " LX" << lathe_tool.x_mm << " LZ" << lathe_tool.z_mm << " LR" << lathe_tool.nose_radius_mm;
+        }
     }
 
     msg << " T" << gc_state.selected_tool;

@@ -12,6 +12,7 @@
 #include "GCode.h"  // MaxToolNumber
 #include "Module.h"
 #include "ToolChangers/atc.h"
+#include "Lathe.h"
 
 // ===============  No floats! ===========================
 // ================ NO FLOATS! ==========================
@@ -65,6 +66,7 @@ namespace Spindles {
         void           stop() { setState(SpindleState::Disable, 0); }
         virtual void   config_message() = 0;
         virtual bool   isRateAdjusted();
+        virtual const Lathe::SpindleFeedback& latheFeedback() const;
         virtual bool   use_delay_settings() const { return true; }
         virtual tool_t get_current_tool_num() { return _current_tool; }
         virtual bool   tool_change(uint32_t tool_number, bool pre_select, bool set_tool);

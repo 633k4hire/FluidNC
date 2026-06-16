@@ -45,6 +45,7 @@ const std::map<ExecAlarm, const char*> AlarmNames = {
     { ExecAlarm::ExpanderReset, "Expander Reset" },
     { ExecAlarm::GCodeError, "GCode Error" },
     { ExecAlarm::ProbeHardLimit, "Probe Hard Limit" },
+    { ExecAlarm::LatheSync, "Lathe Synchronization Lost" },
 };
 
 const char* alarmString(ExecAlarm alarmNumber) {

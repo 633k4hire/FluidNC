@@ -21,6 +21,7 @@ enum class ExecAlarm : uint8_t {
     ExpanderReset         = 16,
     GCodeError            = 17,
     ProbeHardLimit        = 18,
+    LatheSync             = 19,
 };
 
 extern volatile ExecAlarm lastAlarm;
