@@ -11,6 +11,41 @@ var esp_error_message ="";
 var esp_error_code = 0;
 var xmlhttpupload;
 var typeupload = 0;
+
+function RenderKeyValueList(items){
+    var content = "<table class='table table-striped'><tbody>";
+    for (var i = 0; i < items.length; i++) {
+        content += "<tr><td>" + items[i].id + "</td><td>" + items[i].value + "</td></tr>";
+    }
+    content += "</tbody></table>";
+    return content;
+}
+
+function RefreshLatheStatus(){
+    var target = document.getElementById('lathe_status');
+    if (!target) return;
+    target.innerHTML = "Loading lathe status...";
+    var request = new XMLHttpRequest();
+    request.onreadystatechange = function() {
+        if (request.readyState == 4) {
+            if (request.status == 200) {
+                var jsonresponse = JSON.parse(request.responseText);
+                if (jsonresponse.status == "ok" && jsonresponse.data) {
+                    target.innerHTML = RenderKeyValueList(jsonresponse.data);
+                } else {
+                    target.innerHTML = "Lathe status command returned an error.";
+                }
+            } else if (request.status == 401) {
+                RL();
+            } else {
+                target.innerHTML = "Lathe status is unavailable.";
+            }
+        }
+    };
+    request.open("GET", "/command?cmd=" + encodeURIComponent("[ESP421]"), true);
+    request.send();
+}
+
 function navbar(){
     var content="<table><tr>";
     var tlist = currentpath.split("/");
@@ -305,6 +340,7 @@ xmlhttp.onreadystatechange = function() {
             if (nbitem == 4) {
                 SendCommand('list','all');
                 FWOk();
+                RefreshLatheStatus();
             } else {
                 error = true;
                 

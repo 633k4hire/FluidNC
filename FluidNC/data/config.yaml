@@ -154,3 +154,15 @@ report_inches: false
 enable_parking_override_control: false
 use_line_numbers: false
 planner_blocks: 16
+
+# Optional lathe feature gate. Keep disabled for non-lathe machines.
+lathe:
+  enable: false
+  enable_css: false
+  enable_feed_per_rev: false
+  enable_threading: false
+  min_css_diameter_mm: 1.000000
+  max_css_rpm: 0.000000
+  x_axis: 0
+  z_axis: 2
+  feedback_stale_ms: 250

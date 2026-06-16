@@ -12,6 +12,9 @@
 #include "Machine/MachineConfig.h"
 #include "Configuration/JsonGenerator.h"
 #include "Report.h"  // git_info
+#include "GCode.h"
+#include "Lathe.h"
+#include "Spindles/Spindle.h"
 
 #include <Esp.h>
 
@@ -111,6 +114,67 @@ namespace WebUI {
             j.member("status", isok ? "ok" : "error");
             j.member("data", message);
             j.end();
+        }
+
+
+        static std::string float_string(float value, int precision = 3) {
+            std::ostringstream msg;
+            msg << std::fixed << std::setprecision(precision) << value;
+            return msg.str();
+        }
+
+        static const char* lathe_spindle_mode_name() {
+            return gc_state.modal.lathe_spindle_speed_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed ? "G96 CSS" : "G97 fixed RPM";
+        }
+
+        static const char* lathe_diameter_mode_name() {
+            return gc_state.modal.lathe_diameter_mode == Lathe::DiameterMode::Diameter ? "G7 diameter" : "G8 radius";
+        }
+
+        static const char* feed_mode_name() {
+            switch (gc_state.modal.feed_rate) {
+                case FeedRate::InverseTime:
+                    return "G93 inverse time";
+                case FeedRate::UnitsPerRev:
+                    return "G95 units/rev";
+                case FeedRate::UnitsPerMin:
+                    return "G94 units/min";
+            }
+            return "unknown";
+        }
+
+        static Error showLatheStatusJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP421
+            JSONencoder j(&out);
+            j.begin();
+            j.member("cmd", "421");
+            j.member("status", "ok");
+            j.begin_array("data");
+
+            j.id_value_object("Lathe enabled", Lathe::enabled() ? "true" : "false");
+            j.id_value_object("Spindle speed mode", lathe_spindle_mode_name());
+            j.id_value_object("Diameter mode", lathe_diameter_mode_name());
+            j.id_value_object("Feed mode", feed_mode_name());
+            j.id_value_object("Programmed S", float_string(gc_state.spindle_speed));
+            j.id_value_object("Effective RPM", float_string(gc_state.lathe_commanded_rpm));
+            j.id_value_object("CSS clamp RPM", float_string(Lathe::max_css_rpm()));
+            j.id_value_object("Minimum CSS diameter mm", float_string(Lathe::min_css_diameter_mm()));
+
+            auto tool = Lathe::active_tool_offset();
+            j.id_value_object("Active lathe tool", tool.valid ? int32_t(tool.tool_number) : int32_t(0));
+            j.id_value_object("Lathe tool X offset mm", float_string(tool.x_mm));
+            j.id_value_object("Lathe tool Z offset mm", float_string(tool.z_mm));
+            j.id_value_object("Tool nose radius mm", float_string(tool.nose_radius_mm));
+
+            const auto feedback = spindle->latheFeedback().status();
+            j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
+            j.id_value_object("Feedback index", feedback.has_index_pulse ? "true" : "false");
+            j.id_value_object("Feedback angular position", feedback.has_angular_position ? "true" : "false");
+            j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
+            j.id_value_object("Feedback fault", feedback.fault ? "true" : "false");
+
+            j.end_array();
+            j.end();
+            return Error::Ok;
         }
 
         static Error showSysStats(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP420
@@ -249,6 +313,7 @@ namespace WebUI {
             // WU - need user or admin password to set
             // WA - need admin password to set
             new WebCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
+            new WebCommand(NULL, WEBCMD, WU, "ESP421", "System/Lathe", showLatheStatusJSON, anyState);
             new WebCommand("RESTART", WEBCMD, WA, "ESP444", "System/Control", setSystemMode);
 
             //      new WebCommand("ON|OFF", WEBCMD, WA, "ESP115", "Radio/State", setRadioState);
