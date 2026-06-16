@@ -16,6 +16,20 @@
 #include <cstdint>
 
 // Define planner data condition flags. Used to denote running conditions of a block.
+struct LatheCssPlanData {
+    uint8_t enabled : 1;
+    float   surface_speed;
+    float   start_diameter_mm;
+    float   target_diameter_mm;
+    float   max_rpm;
+};
+
+struct LatheThreadingPlanData {
+    uint8_t enabled : 1;
+    float   pitch_mm;
+    float   start_rpm;
+};
+
 struct PlMotion {
     uint8_t rapidMotion : 1;
     uint8_t systemMotion : 1;    // Single motion. Circumvents planner state. Used by home/park.
@@ -56,6 +70,9 @@ struct plan_block_t {
     // Stored spindle speed data used by spindle overrides and resuming methods.
     SpindleSpeed spindle_speed;  // Block spindle speed. Copied from pl_line_data.
 
+    LatheCssPlanData      lathe_css;
+    LatheThreadingPlanData lathe_threading;
+
     bool is_jog;
 };
 
@@ -63,6 +80,8 @@ struct plan_block_t {
 struct plan_line_data_t {
     float        feed_rate;       // Desired feed rate for line motion. Value is ignored, if rapid motion.
     SpindleSpeed spindle_speed;   // Desired spindle speed through line motion.
+    LatheCssPlanData      lathe_css;
+    LatheThreadingPlanData lathe_threading;
     PlMotion     motion;          // Bitflag variable to indicate motion conditions. See defines above.
     SpindleState spindle;         // Spindle enable state
     CoolantState coolant;         // Coolant state

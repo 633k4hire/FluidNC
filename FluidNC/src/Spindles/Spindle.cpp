@@ -64,6 +64,11 @@ namespace Spindles {
         return false;  // default for basic spindle is false
     }
 
+    const Lathe::SpindleFeedback& Spindle::latheFeedback() const {
+        static Lathe::NullSpindleFeedback nullFeedback;
+        return nullFeedback;
+    }
+
     void Spindle::setupSpeeds(uint32_t max_dev_speed) {
         size_t nsegments = _speeds.size() - 1;
         if (nsegments < 1) {

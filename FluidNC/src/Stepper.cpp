@@ -16,6 +16,7 @@
 #include "Planner.h"
 #include "Protocol.h"
 #include <cmath>
+#include "Lathe.h"
 
 using namespace Stepper;
 
@@ -649,6 +650,17 @@ void Stepper::prep_buffer() {
         if (st_prep_block->is_pwm_rate_adjusted || sys.step_control.updateSpindleSpeed) {
             if (pl_block->spindle != SpindleState::Disable) {
                 float speed = pl_block->spindle_speed;
+                if (pl_block->lathe_threading.enabled) {
+                    if (!Lathe::feedback_supports_threading(spindle->latheFeedback().status())) {
+                        send_alarm(ExecAlarm::LatheSync);
+                    }
+                }
+                if (pl_block->lathe_css.enabled) {
+                    const float completed = pl_block->millimeters > 0.0f ? (pl_block->millimeters - mm_remaining) / pl_block->millimeters : 1.0f;
+                    const float diameter = pl_block->lathe_css.start_diameter_mm +
+                                           (pl_block->lathe_css.target_diameter_mm - pl_block->lathe_css.start_diameter_mm) * completed;
+                    speed = Lathe::clamp_css_rpm(Lathe::css_rpm_from_diameter_mm(pl_block->lathe_css.surface_speed, diameter, false));
+                }
                 // NOTE: Feed and rapid overrides are independent of PWM value and do not alter laser power/rate.
                 if (st_prep_block->is_pwm_rate_adjusted) {
                     speed *= (prep.current_speed * prep.inv_rate);

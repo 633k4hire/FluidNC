@@ -57,6 +57,13 @@
         <div class="panel">
             <center><h2 id="MSG"></h2></center>
         </div>
+        <div class="panel" id="LATHEPANEL">
+            <div class="panel-heading">Lathe Status</div>
+            <div class="panel-body">
+                <input class="btn btn-primary" type="button" onclick="RefreshLatheStatus();" value="Refresh Lathe Status"/>
+                <div id="lathe_status" class="info">Lathe status has not been loaded.</div>
+            </div>
+        </div>
         <div class="panel hide_it" id="FILESYSTEM">
             <div class="panel-heading">Flash Filesystem</div>
             <div class="panel-body">
