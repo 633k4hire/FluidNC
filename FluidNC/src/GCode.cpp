@@ -9,6 +9,7 @@
 #include "Settings.h"
 #include "Config.h"
 #include "Report.h"
+#include "Lathe.h"
 #include "Jog.h"
 #include "Protocol.h"             // protocol_buffer_synchronize
 #include "MotionControl.h"        // mc_override_ctrl_update
@@ -56,7 +57,9 @@ gc_modal_t modal_defaults = {
     ToolChange::Disable,
     SetToolNumber::Disable,
     IoControl::None,
-    Override::ParkingMotion
+    Override::ParkingMotion,
+    Lathe::SpindleSpeedMode::FixedRPM,
+    Lathe::DiameterMode::Radius
 };
 // clang-format on
 
@@ -235,6 +238,18 @@ void gc_wco_changed() {
         protocol_buffer_synchronize();
     }
     allChannels.notifyWco();
+}
+
+static void gc_apply_lathe_tool_offsets(uint32_t tool_number) {
+    if (!Lathe::enabled()) {
+        return;
+    }
+
+    auto active = Lathe::select_tool(tool_number);
+    gc_state.tool_length_offset[Lathe::x_axis()] = active.valid ? active.x_mm : 0.0f;
+    gc_state.tool_length_offset[Lathe::z_axis()] = active.valid ? active.z_mm : 0.0f;
+    coords[CoordIndex::TLO]->set(gc_state.tool_length_offset);
+    gc_ngc_changed(CoordIndex::TLO);
 }
 
 // Executes one line of NUL-terminated G-Code.
@@ -426,6 +441,21 @@ Error gc_execute_line(const char* input_line) {
                         gc_block.modal.motion = Motion::CcwArc;
                         mg_word_bit           = ModalGroup::MG1;
                         break;
+                    case 32:
+                    case 33:
+                        if (mantissa != 0) {
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        if (auto err = Lathe::validate_feature(Lathe::Feature::Threading); err != Error::Ok) {
+                            return err;
+                        }
+                        if (axis_command != AxisCommand::None) {
+                            return Error::GcodeAxisCommandConflict;
+                        }
+                        axis_command          = AxisCommand::MotionMode;
+                        gc_block.modal.motion = Motion::Threading;
+                        mg_word_bit           = ModalGroup::MG1;
+                        break;
                     case 38:  // G38 - probe
                         //only allow G38 "Probe" commands if a probe pin is defined.
                         if (!config->_probe->exists()) {
@@ -521,6 +551,43 @@ Error gc_execute_line(const char* input_line) {
                     case 93:
                         gc_block.modal.feed_rate = FeedRate::InverseTime;
                         mg_word_bit              = ModalGroup::MG5;
+                        break;
+                    case 95:
+                        if (auto err = Lathe::validate_feature(Lathe::Feature::FeedPerRevolution); err != Error::Ok) {
+                            return err;
+                        }
+                        gc_block.modal.feed_rate = FeedRate::UnitsPerRev;
+                        mg_word_bit              = ModalGroup::MG5;
+                        break;
+                    case 96:
+                        if (auto err = Lathe::validate_feature(Lathe::Feature::ConstantSurfaceSpeed); err != Error::Ok) {
+                            return err;
+                        }
+                        gc_block.modal.lathe_spindle_speed_mode = Lathe::SpindleSpeedMode::ConstantSurfaceSpeed;
+                        mg_word_bit                             = ModalGroup::MG14;
+                        break;
+                    case 97:
+                        if (auto err = Lathe::validate_feature(Lathe::Feature::ConstantSurfaceSpeed); err != Error::Ok) {
+                            return err;
+                        }
+                        gc_block.modal.lathe_spindle_speed_mode = Lathe::SpindleSpeedMode::FixedRPM;
+                        mg_word_bit                             = ModalGroup::MG14;
+                        break;
+                    case 7:
+                        if (!Lathe::enabled()) {
+                            log_info("Lathe diameter mode (G7) requires the machine/lathe configuration section to be enabled");
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        gc_block.modal.lathe_diameter_mode = Lathe::DiameterMode::Diameter;
+                        mg_word_bit                        = ModalGroup::MG15;
+                        break;
+                    case 8:
+                        if (!Lathe::enabled()) {
+                            log_info("Lathe radius mode (G8) requires the machine/lathe configuration section to be enabled");
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        gc_block.modal.lathe_diameter_mode = Lathe::DiameterMode::Radius;
+                        mg_word_bit                        = ModalGroup::MG15;
                         break;
                     case 94:
                         gc_block.modal.feed_rate = FeedRate::UnitsPerMin;
@@ -1005,6 +1072,10 @@ Error gc_execute_line(const char* input_line) {
             // value in the block. If no F word is passed with a motion command that requires a feed rate, this will error
             // out in the motion modes error-checking. However, if no F word is passed with NO motion command that requires
             // a feed rate, we simply move on and the state feed rate value gets updated to zero and remains undefined.
+        } else if (gc_block.modal.feed_rate == FeedRate::UnitsPerRev) {  // = G95
+            if (gc_state.modal.feed_rate == FeedRate::UnitsPerRev && bitnum_is_false(value_words, GCodeWord::F)) {
+                gc_block.values.f = gc_state.feed_rate;
+            }
         } else {  // = G94
             // - In units per mm mode: If F word passed, ensure value is in mm/min, otherwise push last state value.
             if (gc_state.modal.feed_rate == FeedRate::UnitsPerMin) {  // Last state is also G94
@@ -1015,7 +1086,7 @@ Error gc_execute_line(const char* input_line) {
                 } else {
                     gc_block.values.f = gc_state.feed_rate;  // Push last state feed rate
                 }
-            }  // Else, switching to G94 from G93, so don't push last state feed rate. Its undefined or the passed F word value.
+            }  // Else, switching to G94 from G93/G95, so don't push last state feed rate.
         }
     }
     // clear_bitnum(value_words, GCodeWord::F); // NOTE: Single-meaning value word. Set at end of error-checking.
@@ -1029,6 +1100,11 @@ Error gc_execute_line(const char* input_line) {
         // [7. Spindle control ]: N/A
         // [8. Coolant control ]: N/A
         // [9. Enable/disable feed rate or spindle overrides ]: NOT SUPPORTED.
+    }
+    if (gc_block.modal.lathe_spindle_speed_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed) {
+        if (gc_block.values.s <= 0.0f || Lathe::max_css_rpm() <= 0.0f) {
+            return Error::GcodeValueWordInvalid;
+        }
     }
 
     if (config->_enableParkingOverrideControl) {
@@ -1140,6 +1216,10 @@ Error gc_execute_line(const char* input_line) {
                 gc_block.values.xyz[axis] *= MM_PER_INCH;
             }
         }
+    }
+    if (!nonmodalG38 && Lathe::enabled() && gc_block.modal.lathe_diameter_mode == Lathe::DiameterMode::Diameter &&
+        bitnum_is_true(axis_words, Lathe::x_axis())) {
+        gc_block.values.xyz[Lathe::x_axis()] = Lathe::x_program_to_machine_mm(gc_block.values.xyz[Lathe::x_axis()], gc_block.modal.lathe_diameter_mode);
     }
 
     // [13. Cutter radius compensation ]: G41/42 NOT SUPPORTED. Error, if enabled while G53 is active.
@@ -1352,6 +1432,23 @@ Error gc_execute_line(const char* input_line) {
                     // Axis words are optional. If missing, set axis command flag to ignore execution.
                     if (!axis_words) {
                         axis_command = AxisCommand::None;
+                    }
+                    break;
+                case Motion::Threading:
+                    if (!axis_words) {
+                        return Error::GcodeNoAxisWords;
+                    }
+                    if (gc_block.modal.feed_rate != FeedRate::UnitsPerRev) {
+                        log_info("Lathe threading requires G95 feed-per-revolution mode");
+                        return Error::GcodeUnsupportedCommand;
+                    }
+                    if (gc_block.modal.spindle == SpindleState::Disable) {
+                        log_info("Lathe threading requires an active spindle");
+                        return Error::GcodeUnsupportedCommand;
+                    }
+                    if (!Lathe::feedback_supports_threading(spindle->latheFeedback().status())) {
+                        log_info("Lathe threading requires measured RPM, index pulse, and angular position feedback");
+                        return Error::GcodeUnsupportedCommand;
                     }
                     break;
                 case Motion::CwArc:
@@ -1640,17 +1737,35 @@ Error gc_execute_line(const char* input_line) {
     gc_state.feed_rate = gc_block.values.f;   // Always copy this value. See feed rate error-checking.
     pl_data->feed_rate = gc_state.feed_rate;  // Record data for planner use.
     // [4. Set spindle speed ]:
-    if ((gc_state.spindle_speed != gc_block.values.s) || syncLaser) {
+    const auto next_lathe_spindle_mode = gc_block.modal.lathe_spindle_speed_mode;
+    float requested_spindle_rpm = gc_block.values.s;
+    if (next_lathe_spindle_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed) {
+        const float current_diameter = Lathe::x_machine_to_diameter_mm(gc_state.position[Lathe::x_axis()]);
+        requested_spindle_rpm = Lathe::clamp_css_rpm(
+            Lathe::css_rpm_from_diameter_mm(gc_block.values.s, current_diameter, gc_block.modal.units == Units::Inches));
+    }
+    if ((gc_state.spindle_speed != gc_block.values.s) || syncLaser || gc_state.modal.lathe_spindle_speed_mode != next_lathe_spindle_mode) {
         if (gc_state.modal.spindle != SpindleState::Disable && !laserIsMotion && !state_is(State::CheckMode)) {
             protocol_buffer_synchronize();
-            spindle->setState(gc_state.modal.spindle, disableLaser ? 0 : (uint32_t)gc_block.values.s);
+            spindle->setState(gc_state.modal.spindle, disableLaser ? 0 : (uint32_t)requested_spindle_rpm);
             gc_ovr_changed();
         }
         gc_state.spindle_speed = gc_block.values.s;  // Update spindle speed state.
     }
+    gc_state.modal.lathe_spindle_speed_mode = next_lathe_spindle_mode;
+    gc_state.modal.lathe_diameter_mode      = gc_block.modal.lathe_diameter_mode;
+    gc_state.lathe_commanded_rpm            = requested_spindle_rpm;
+    if (gc_state.modal.feed_rate == FeedRate::UnitsPerRev) {
+        const auto feedback = spindle->latheFeedback().status();
+        float rpm = feedback.has_measured_rpm && !feedback.stale && !feedback.fault ? feedback.measured_rpm : gc_state.lathe_commanded_rpm;
+        if (rpm <= 0.0f) {
+            rpm = gc_state.spindle_speed;
+        }
+        pl_data->feed_rate = Lathe::feed_per_rev_to_mm_per_min(gc_state.feed_rate, rpm, gc_state.modal.units == Units::Inches);
+    }
     // NOTE: Pass zero spindle speed for all restricted laser motions.
     if (!disableLaser) {
-        pl_data->spindle_speed = gc_state.spindle_speed;  // Record data for planner use.
+        pl_data->spindle_speed = gc_state.lathe_commanded_rpm;  // Record data for planner use.
     }  // else { pl_data->spindle_speed = 0.0; } // Initialized as zero already.
     // [5. Select tool ]: NOT SUPPORTED. Only tracks tool value.
     // [M6. Change tool ]:
@@ -1672,6 +1787,7 @@ Error gc_execute_line(const char* input_line) {
             spindle->tool_change(gc_state.selected_tool, false, false);
             if (spindle->_atc_name == "" && spindle->_m6_macro.get().empty()) {  // if neither of these exist we need to set the value here
                 gc_state.current_tool = gc_state.selected_tool;
+                gc_apply_lathe_tool_offsets(gc_state.current_tool);
             }
             report_ovr_counter = 0;  // Set to report change immediately
             gc_ovr_changed();
@@ -1694,6 +1810,7 @@ Error gc_execute_line(const char* input_line) {
         }
         spindle->tool_change(gc_state.selected_tool, false, true);
         gc_state.current_tool = gc_block.values.q;
+        gc_apply_lathe_tool_offsets(gc_state.current_tool);
         report_ovr_counter    = 0;  // Set to report change immediately
         gc_ovr_changed();
     }
@@ -1888,10 +2005,32 @@ Error gc_execute_line(const char* input_line) {
     // NOTE: Commands G10,G28,G30,G92 lock out and prevent axis words from use in motion modes.
     // Enter motion modes only if there are axis words or a motion mode command word in the block.
     gc_state.modal.motion = gc_block.modal.motion;
+    if (gc_state.modal.lathe_spindle_speed_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed && axis_command == AxisCommand::MotionMode) {
+        pl_data->lathe_css.enabled            = 1;
+        pl_data->lathe_css.surface_speed      = gc_state.spindle_speed;
+        pl_data->lathe_css.start_diameter_mm  = Lathe::x_machine_to_diameter_mm(gc_state.position[Lathe::x_axis()]);
+        pl_data->lathe_css.target_diameter_mm = Lathe::x_machine_to_diameter_mm(gc_block.values.xyz[Lathe::x_axis()]);
+        pl_data->lathe_css.max_rpm            = Lathe::max_css_rpm();
+    }
+    if (gc_state.modal.motion == Motion::Threading) {
+        const auto threading_feedback = spindle->latheFeedback().status();
+        if (!Lathe::feedback_supports_threading(threading_feedback)) {
+            send_alarm(ExecAlarm::LatheSync);
+            return Error::GcodeUnsupportedCommand;
+        }
+        if (!spindle->latheFeedback().synchronize_for_threading_start()) {
+            send_alarm(ExecAlarm::LatheSync);
+            return Error::GcodeUnsupportedCommand;
+        }
+        pl_data->lathe_threading.enabled   = 1;
+        pl_data->lathe_threading.pitch_mm  = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
+        pl_data->lathe_threading.start_rpm = threading_feedback.measured_rpm;
+        pl_data->motion.noFeedOverride     = 1;
+    }
     if (gc_state.modal.motion != Motion::None) {
         if (axis_command == AxisCommand::MotionMode) {
             GCUpdatePos gc_update_pos = GCUpdatePos::Target;
-            if (gc_state.modal.motion == Motion::Linear) {
+            if (gc_state.modal.motion == Motion::Linear || gc_state.modal.motion == Motion::Threading) {
                 mc_linear(gc_block.values.xyz, pl_data, gc_state.position);
             } else if (gc_state.modal.motion == Motion::Seek) {
                 pl_data->motion.rapidMotion = 1;  // Set rapid motion flag.

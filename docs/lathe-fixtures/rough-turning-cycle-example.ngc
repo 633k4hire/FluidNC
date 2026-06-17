@@ -1,0 +1,11 @@
+(FluidNC lathe Phase 5 rough-turning fixture)
+(Example shows Lathe::build_rough_turning_cycle expansion into validated lower-level moves.)
+G21 G18 G90 G94
+G97 S900 M3
+T2 M6
+G1 X28.0 Z-20.0 F120.0
+G0 X30.0 Z0.0
+G1 X26.0 Z-20.0 F120.0
+G1 X26.0 Z-20.0 F120.0 (finish pass placeholder)
+M5
+M30
