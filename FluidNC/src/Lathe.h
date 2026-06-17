@@ -61,6 +61,17 @@ namespace Lathe {
         bool     valid       = false;
     };
 
+    struct TouchOffSpec {
+        uint32_t     tool_number     = 0;
+        float        machine_x_mm    = 0.0f;
+        float        machine_z_mm    = 0.0f;
+        float        reference_x_mm  = 0.0f;
+        float        reference_z_mm  = 0.0f;
+        DiameterMode x_mode          = DiameterMode::Radius;
+        bool         set_x           = true;
+        bool         set_z           = true;
+    };
+
     enum class CycleMoveKind : uint8_t {
         Linear,
         Threading,
@@ -153,6 +164,7 @@ namespace Lathe {
     std::optional<ToolData> get_tool_data(uint32_t tool_number);
     ActiveToolOffset select_tool(uint32_t tool_number);
     ActiveToolOffset active_tool_offset();
+    Error touch_off_tool(const TouchOffSpec& spec);
 
     CyclePlan build_threading_cycle(const ThreadingCycleSpec& spec);
     CyclePlan build_rough_turning_cycle(const RoughTurningCycleSpec& spec);

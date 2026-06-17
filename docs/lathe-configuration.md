@@ -67,6 +67,18 @@ The active X/Z lathe offset is applied through the existing TLO vector on `M6` a
 
 Firmware APIs now load the table lazily from NVS, save it whenever `Lathe::set_tool_data()` changes a slot, and provide `Lathe::clear_tool_table(true)` for clearing the persisted table. The first-class operator UI still needs an editing/touch-off screen, but the firmware storage layer no longer loses tool data on reboot.
 
+### Touch-off workflow API
+
+The firmware layer now includes `Lathe::touch_off_tool()` for operator touch-off workflows. A caller supplies the tool number, current machine X/Z position at the touch point, the known reference X/Z value, and whether X is being entered in `G7` diameter mode or `G8` radius mode. The helper:
+
+- converts diameter-mode X references to machine-radius coordinates;
+- calculates geometry offsets as `reference - machine_position - wear`;
+- preserves existing wear, nose radius, and insert orientation data;
+- persists the updated tool table through `Lathe::set_tool_data()`;
+- refreshes the active lathe offset if the touched-off tool is already selected.
+
+This is the firmware-side foundation for a WebUI touch-off panel. The remaining UI work is to collect the current machine position/reference values from the operator, call the firmware command layer that wraps this helper, and refresh `ESP421` lathe status after saving.
+
 ## WebUI/API support
 
 The WebUI command endpoint exposes lathe status via:
@@ -94,6 +106,6 @@ If a future .NET 8 Blazor WebUI consumes the lathe endpoint, do not put C# lambd
 
 ## Current limitations
 
-- Operator-facing touch-off and tool-table editing screens are not complete yet; current persistence is exposed at the firmware API layer.
+- Operator-facing touch-off and tool-table editing screens are not complete yet; current persistence and touch-off math are exposed at the firmware API layer.
 - Parser-level canned cycle execution is not wired yet; current cycle helpers produce validated lower-level move plans.
 - Encoder hardware backends still need to implement the spindle feedback contract before threading can be used on real hardware.

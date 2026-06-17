@@ -234,6 +234,35 @@ namespace Lathe {
         return active_offset;
     }
 
+    Error touch_off_tool(const TouchOffSpec& spec) {
+        if (spec.tool_number == 0 || (!spec.set_x && !spec.set_z)) {
+            return Error::GcodeValueWordInvalid;
+        }
+        if ((spec.set_x && (!std::isfinite(spec.machine_x_mm) || !std::isfinite(spec.reference_x_mm))) ||
+            (spec.set_z && (!std::isfinite(spec.machine_z_mm) || !std::isfinite(spec.reference_z_mm)))) {
+            return Error::GcodeValueWordInvalid;
+        }
+
+        ToolData data;
+        if (auto existing = get_tool_data(spec.tool_number)) {
+            data = *existing;
+        }
+
+        if (spec.set_x) {
+            const float reference_machine_x = x_program_to_machine_mm(spec.reference_x_mm, spec.x_mode);
+            data.geometry_x_mm = reference_machine_x - spec.machine_x_mm - data.wear_x_mm;
+        }
+        if (spec.set_z) {
+            data.geometry_z_mm = spec.reference_z_mm - spec.machine_z_mm - data.wear_z_mm;
+        }
+
+        set_tool_data(spec.tool_number, data);
+        if (active_offset.tool_number == spec.tool_number) {
+            select_tool(spec.tool_number);
+        }
+        return Error::Ok;
+    }
+
     namespace {
         bool append_cycle_move(CyclePlan& plan, CycleMoveKind kind, float x_mm, float z_mm, float feed) {
             if (plan.count >= MaxCycleMoves) {

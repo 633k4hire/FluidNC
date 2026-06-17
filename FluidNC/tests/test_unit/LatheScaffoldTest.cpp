@@ -120,6 +120,32 @@ TEST(LatheScaffold, LatheToolTableCanBeClearedWithoutPersisting) {
     EXPECT_FALSE(Lathe::get_tool_data(9).has_value());
 }
 
+TEST(LatheScaffold, TouchOffCalculatesGeometryOffsetsAndPreservesWear) {
+    Lathe::clear_tool_table(false);
+
+    Lathe::ToolData tool;
+    tool.wear_x_mm = 0.2f;
+    tool.wear_z_mm = -0.1f;
+    Lathe::set_tool_data(11, tool);
+
+    Lathe::TouchOffSpec spec;
+    spec.tool_number    = 11;
+    spec.machine_x_mm   = 10.0f;
+    spec.machine_z_mm   = -4.0f;
+    spec.reference_x_mm = 24.0f;
+    spec.reference_z_mm = 0.0f;
+    spec.x_mode         = Lathe::DiameterMode::Diameter;
+
+    EXPECT_EQ(Lathe::touch_off_tool(spec), Error::Ok);
+
+    auto stored = Lathe::get_tool_data(11);
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_FLOAT_EQ(stored->geometry_x_mm, 1.8f);
+    EXPECT_FLOAT_EQ(stored->geometry_z_mm, 4.1f);
+    EXPECT_FLOAT_EQ(stored->wear_x_mm, 0.2f);
+    EXPECT_FLOAT_EQ(stored->wear_z_mm, -0.1f);
+}
+
 TEST(LatheScaffold, ThreadingCycleExpandsIntoThreadingPassesAndRetracts) {
     Lathe::ThreadingCycleSpec spec;
     spec.start_x_mm = 20.0f;
