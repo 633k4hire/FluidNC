@@ -1,4 +1,5 @@
 #include "../src/Lathe.h"
+#include "../src/LatheEncoder.h"
 
 #include <gtest/gtest.h>
 
@@ -91,6 +92,15 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     auto stale = feedback.status_at(2000);
     EXPECT_TRUE(stale.stale);
     EXPECT_FALSE(Lathe::feedback_supports_threading(stale));
+}
+
+
+TEST(LatheScaffold, ConfiguredEncoderFeedbackFallsBackToNullWhenInactive) {
+    EXPECT_FALSE(Lathe::encoder_capture_active());
+    auto status = Lathe::configured_spindle_feedback().status();
+    EXPECT_FALSE(status.has_measured_rpm);
+    EXPECT_FALSE(status.has_index_pulse);
+    EXPECT_FALSE(status.has_angular_position);
 }
 
 TEST(LatheScaffold, XOffsetConvertsDiameterModeToMachineRadiusOffset) {

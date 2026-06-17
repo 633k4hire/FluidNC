@@ -14,6 +14,7 @@
 #include "Report.h"  // git_info
 #include "GCode.h"
 #include "Lathe.h"
+#include "LatheEncoder.h"
 #include "Spindles/Spindle.h"
 
 #include <Esp.h>
@@ -160,6 +161,7 @@ namespace WebUI {
             j.id_value_object("CSS clamp RPM", float_string(Lathe::max_css_rpm()));
             j.id_value_object("Minimum CSS diameter mm", float_string(Lathe::min_css_diameter_mm()));
             j.id_value_object("Encoder enabled", Lathe::encoder_enabled() ? "true" : "false");
+            j.id_value_object("Encoder capture active", Lathe::encoder_capture_active() ? "true" : "false");
             j.id_value_object("Encoder pulses/rev", int32_t(Lathe::encoder_pulses_per_revolution()));
 
             auto tool = Lathe::active_tool_offset();
@@ -172,6 +174,8 @@ namespace WebUI {
             j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
             j.id_value_object("Feedback index", feedback.has_index_pulse ? "true" : "false");
             j.id_value_object("Feedback angular position", feedback.has_angular_position ? "true" : "false");
+            j.id_value_object("Feedback angular rev", feedback.has_angular_position ? float_string(feedback.angular_position_rev) : "not available");
+            j.id_value_object("Feedback revolution count", int32_t(feedback.revolution_count));
             j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
             j.id_value_object("Feedback fault", feedback.fault ? "true" : "false");
 

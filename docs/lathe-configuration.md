@@ -141,3 +141,10 @@ If a future .NET 8 Blazor WebUI consumes the lathe endpoint, do not put C# lambd
 - Parser-level canned cycle execution is not wired yet; current cycle helpers produce validated lower-level move plans.
 - Cycle helper coverage now includes threading, rough turning, finishing, grooving, and peck drilling expansion helpers. Parser-level canned-cycle G-code words are still not wired.
 - Encoder hardware pin capture still needs to be wired to the firmware encoder backend core before threading can be used on real hardware.
+
+
+## ESP32-S3 encoder capture backend
+
+When `lathe.encoder_enable: true`, firmware initializes the configured `encoder_pulse_pin` as an interrupt input and feeds rising-edge pulse timestamps into `Lathe::EncoderSpindleFeedback`. If `encoder_index_pin` is configured, firmware also initializes it as an interrupt input and feeds rising-edge index timestamps into the same feedback object. The active spindle feedback path returns this live encoder feedback while capture is active; otherwise it preserves the default null-feedback behavior.
+
+`ESP421` reports whether encoder capture is active, the configured pulses per revolution, measured RPM, index availability, angular position, revolution count, stale state, and fault state. Hardware validation is still required on the target machine before enabling threading cuts in material.

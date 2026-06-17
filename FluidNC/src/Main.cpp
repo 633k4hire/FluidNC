@@ -12,6 +12,7 @@
 #    include "Settings.h"
 #    include "SettingsDefinitions.h"
 #    include "Limit.h"
+#    include "LatheEncoder.h"
 #    include "Protocol.h"
 #    include "System.h"
 #    include "Driver/Console.h"
@@ -141,6 +142,7 @@ void setup() {
 
         if (!state_is(State::ConfigAlarm)) {
             auto spindles = Spindles::SpindleFactory::objects();
+            Lathe::init_encoder();
             for (auto const& spindle : spindles) {
                 spindle->init();
             }
