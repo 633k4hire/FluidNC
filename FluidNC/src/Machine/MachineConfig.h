@@ -30,6 +30,7 @@
 #include "UserOutputs.h"
 #include "UserInputs.h"
 #include "Macros.h"
+#include "Machine/LatheConfig.h"
 
 #include <string_view>
 
@@ -82,6 +83,7 @@ namespace Machine {
         Macros*         _macros      = nullptr;
         Start*          _start       = nullptr;
         Parking*        _parking     = nullptr;
+        LatheConfig*    _lathe       = nullptr;
 
         //        Listeners::SysListenerList _sysListeners;
         //        Spindles::SpindleList      _spindles;

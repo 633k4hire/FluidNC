@@ -18,6 +18,8 @@ idf_component_register(SRCS BTConfig.cpp
 							Jog.cpp
 							JSONEncoder.cpp
 							Limit.cpp
+							Lathe.cpp
+							LatheEncoder.cpp
 							lineedit.cpp
 							Logging.cpp
 							Main.cpp

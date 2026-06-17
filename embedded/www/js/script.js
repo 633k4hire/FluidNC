@@ -11,6 +11,121 @@ var esp_error_message ="";
 var esp_error_code = 0;
 var xmlhttpupload;
 var typeupload = 0;
+
+function RenderKeyValueList(items){
+    var content = "<table class='table table-striped'><tbody>";
+    for (var i = 0; i < items.length; i++) {
+        content += "<tr><td>" + items[i].id + "</td><td>" + items[i].value + "</td></tr>";
+    }
+    content += "</tbody></table>";
+    return content;
+}
+
+
+function LatheStatusValue(items, id){
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].id == id) return items[i].value;
+    }
+    return "";
+}
+
+function RenderLatheWarnings(items){
+    var warnings = [];
+    if (LatheStatusValue(items, "Lathe enabled") != "true") warnings.push("Lathe mode is disabled.");
+    if (LatheStatusValue(items, "Encoder enabled") != "true") warnings.push("Encoder is disabled; threading and measured-RPM G95 are not ready.");
+    if (LatheStatusValue(items, "Encoder capture active") != "true") warnings.push("Encoder capture is not active.");
+    if (LatheStatusValue(items, "Feedback index") != "true") warnings.push("No spindle index pulse has been seen.");
+    if (LatheStatusValue(items, "Feedback angular position") != "true") warnings.push("No angular spindle position is available.");
+    if (LatheStatusValue(items, "Feedback stale") == "true") warnings.push("Spindle feedback is stale.");
+    if (LatheStatusValue(items, "Feedback fault") == "true") warnings.push("Spindle feedback is faulted.");
+    if (LatheStatusValue(items, "Diameter mode").indexOf("diameter") >= 0) warnings.push("Diameter mode is active; X touch-off references entered as diameter will be converted to internal radius.");
+    if (warnings.length == 0) return "<div class='info'>No lathe warnings reported.</div>";
+    var content = "<ul>";
+    for (var i = 0; i < warnings.length; i++) content += "<li>" + warnings[i] + "</li>";
+    content += "</ul>";
+    return content;
+}
+
+function ReadLatheField(id){
+    var field = document.getElementById(id);
+    return field ? field.value.trim() : "";
+}
+
+function ExecuteLatheCommand(command, resultId){
+    var target = document.getElementById(resultId);
+    if (target) target.innerHTML = "Sending command...";
+    var request = new XMLHttpRequest();
+    request.onreadystatechange = function() {
+        if (request.readyState == 4) {
+            if (request.status == 200) {
+                var jsonresponse = JSON.parse(request.responseText);
+                if (target) target.innerHTML = jsonresponse.status == "ok" ? "Command succeeded." : "Command failed: " + request.responseText;
+                RefreshLatheStatus();
+            } else if (request.status == 401) {
+                RL();
+            } else if (target) {
+                target.innerHTML = "Command failed with HTTP status " + request.status;
+            }
+        }
+    };
+    request.open("GET", "/command?cmd=" + encodeURIComponent(command), true);
+    request.send();
+}
+
+function SaveLatheTool(){
+    var command = "[ESP422]T=" + encodeURIComponent(ReadLatheField("lathe_tool_number"));
+    command += " GX=" + encodeURIComponent(ReadLatheField("lathe_geometry_x"));
+    command += " GZ=" + encodeURIComponent(ReadLatheField("lathe_geometry_z"));
+    command += " WX=" + encodeURIComponent(ReadLatheField("lathe_wear_x"));
+    command += " WZ=" + encodeURIComponent(ReadLatheField("lathe_wear_z"));
+    command += " NR=" + encodeURIComponent(ReadLatheField("lathe_nose_radius"));
+    command += " O=" + encodeURIComponent(ReadLatheField("lathe_orientation"));
+    ExecuteLatheCommand(command, "lathe_tool_result");
+}
+
+function TouchOffLatheTool(){
+    var command = "[ESP423]T=" + encodeURIComponent(ReadLatheField("lathe_touch_tool"));
+    var mx = ReadLatheField("lathe_machine_x");
+    var rx = ReadLatheField("lathe_reference_x");
+    var mz = ReadLatheField("lathe_machine_z");
+    var rz = ReadLatheField("lathe_reference_z");
+    if (mx !== "" && rx !== "") {
+        command += " MX=" + encodeURIComponent(mx) + " RX=" + encodeURIComponent(rx);
+        command += " MODE=" + encodeURIComponent(ReadLatheField("lathe_touch_mode"));
+    }
+    if (mz !== "" && rz !== "") {
+        command += " MZ=" + encodeURIComponent(mz) + " RZ=" + encodeURIComponent(rz);
+    }
+    ExecuteLatheCommand(command, "lathe_touch_result");
+}
+
+function RefreshLatheStatus(){
+    var target = document.getElementById('lathe_status');
+    if (!target) return;
+    target.innerHTML = "Loading lathe status...";
+    var request = new XMLHttpRequest();
+    request.onreadystatechange = function() {
+        if (request.readyState == 4) {
+            if (request.status == 200) {
+                var jsonresponse = JSON.parse(request.responseText);
+                if (jsonresponse.status == "ok" && jsonresponse.data) {
+                    target.innerHTML = RenderKeyValueList(jsonresponse.data);
+                    var warnings = document.getElementById('lathe_warnings');
+                    if (warnings) warnings.innerHTML = RenderLatheWarnings(jsonresponse.data);
+                } else {
+                    target.innerHTML = "Lathe status command returned an error.";
+                }
+            } else if (request.status == 401) {
+                RL();
+            } else {
+                target.innerHTML = "Lathe status is unavailable.";
+            }
+        }
+    };
+    request.open("GET", "/command?cmd=" + encodeURIComponent("[ESP421]"), true);
+    request.send();
+}
+
 function navbar(){
     var content="<table><tr>";
     var tlist = currentpath.split("/");
@@ -305,6 +420,7 @@ xmlhttp.onreadystatechange = function() {
             if (nbitem == 4) {
                 SendCommand('list','all');
                 FWOk();
+                RefreshLatheStatus();
             } else {
                 error = true;
                 

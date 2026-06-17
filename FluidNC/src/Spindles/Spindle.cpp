@@ -6,6 +6,8 @@
 */
 #include "Spindle.h"
 
+#include "LatheEncoder.h"
+
 #include "System.h"  //sys.spindle_speed_ovr
 
 Spindles::Spindle* spindle = nullptr;
@@ -62,6 +64,11 @@ namespace Spindles {
 
     bool Spindle::isRateAdjusted() {
         return false;  // default for basic spindle is false
+    }
+
+    const Lathe::SpindleFeedback& Spindle::latheFeedback() const {
+        Lathe::set_encoder_commanded_rpm(_current_speed);
+        return Lathe::configured_spindle_feedback();
     }
 
     void Spindle::setupSpeeds(uint32_t max_dev_speed) {

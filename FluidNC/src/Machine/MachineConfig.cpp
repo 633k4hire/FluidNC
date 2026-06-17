@@ -70,6 +70,7 @@ namespace Machine {
         handler.section("extenders", _extenders);
         handler.section("start", _start);
         handler.section("parking", _parking);
+        handler.section("lathe", _lathe);
 
         handler.section("user_outputs", _userOutputs);
         handler.section("user_inputs", _userInputs);
@@ -300,5 +301,6 @@ namespace Machine {
 #endif
         delete _control;
         delete _macros;
+        delete _lathe;
     }
 }
