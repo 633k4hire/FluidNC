@@ -61,6 +61,17 @@ namespace Lathe {
         bool     valid       = false;
     };
 
+    struct TouchOffSpec {
+        uint32_t     tool_number     = 0;
+        float        machine_x_mm    = 0.0f;
+        float        machine_z_mm    = 0.0f;
+        float        reference_x_mm  = 0.0f;
+        float        reference_z_mm  = 0.0f;
+        DiameterMode x_mode          = DiameterMode::Radius;
+        bool         set_x           = true;
+        bool         set_z           = true;
+    };
+
     enum class CycleMoveKind : uint8_t {
         Linear,
         Threading,
@@ -102,10 +113,43 @@ namespace Lathe {
         bool    include_finish_pass = false;
     };
 
+    struct FinishingCycleSpec {
+        float start_x_mm = 0.0f;
+        float end_x_mm   = 0.0f;
+        float start_z_mm = 0.0f;
+        float end_z_mm   = 0.0f;
+        float feed_mm_min = 0.0f;
+    };
+
+    struct GroovingCycleSpec {
+        float start_x_mm    = 0.0f;
+        float final_x_mm    = 0.0f;
+        float z_mm          = 0.0f;
+        float peck_depth_mm = 0.0f;
+        float feed_mm_min   = 0.0f;
+    };
+
+    struct PeckDrillingCycleSpec {
+        float x_mm          = 0.0f;
+        float start_z_mm    = 0.0f;
+        float final_z_mm    = 0.0f;
+        float peck_depth_mm = 0.0f;
+        float feed_mm_min   = 0.0f;
+    };
+
+    struct ThreadingSyncState {
+        float start_z_mm = 0.0f;
+        float end_z_mm   = 0.0f;
+        float pitch_mm   = 0.0f;
+        float start_spindle_revolutions = 0.0f;
+    };
+
     struct FeedbackStatus {
         SpindleSpeed commanded_rpm = 0;
         SpindleSpeed measured_rpm  = 0;
         uint32_t     timestamp_ms  = 0;
+        float        angular_position_rev = 0.0f;
+        uint32_t     revolution_count = 0;
         bool         has_measured_rpm : 1;
         bool         has_index_pulse : 1;
         bool         has_angular_position : 1;
@@ -124,6 +168,28 @@ namespace Lathe {
 
     class NullSpindleFeedback : public SpindleFeedback {};
 
+    class EncoderSpindleFeedback : public SpindleFeedback {
+    public:
+        void configure(uint32_t pulses_per_revolution, uint32_t stale_timeout_ms);
+        void set_commanded_rpm(SpindleSpeed rpm);
+        void record_pulse(uint32_t timestamp_us);
+        void record_index(uint32_t timestamp_us);
+        FeedbackStatus status() const override;
+        FeedbackStatus status_at(uint32_t now_ms) const;
+        bool synchronize_for_threading_start() const override;
+        uint32_t pulses_per_revolution() const { return _pulses_per_revolution; }
+
+    private:
+        uint32_t _pulses_per_revolution = 1;
+        uint32_t _stale_timeout_ms      = 250;
+        uint32_t _last_pulse_us         = 0;
+        uint32_t _previous_pulse_us     = 0;
+        uint32_t _last_index_us         = 0;
+        uint32_t _pulse_count           = 0;
+        uint32_t _index_pulse_count     = 0;
+        SpindleSpeed _commanded_rpm     = 0;
+    };
+
     bool enabled();
     bool feature_enabled(Feature feature);
     Error validate_feature(Feature feature);
@@ -134,6 +200,8 @@ namespace Lathe {
 
     float max_css_rpm();
     float min_css_diameter_mm();
+    bool encoder_enabled();
+    uint32_t encoder_pulses_per_revolution();
     axis_t x_axis();
     axis_t z_axis();
     float css_rpm_from_diameter_mm(float surface_speed, float diameter_mm, bool surface_speed_is_inches_per_minute);
@@ -144,11 +212,23 @@ namespace Lathe {
     bool feedback_supports_threading(const FeedbackStatus& status);
 
     float x_offset_to_machine_mm(float x_offset, DiameterMode mode);
+    float x_program_to_machine_mm(float x_programmed, DiameterMode mode);
+    float x_machine_to_diameter_mm(float x_machine);
+    bool load_tool_table();
+    bool save_tool_table();
+    void clear_tool_table(bool persist);
     void set_tool_data(uint32_t tool_number, const ToolData& data);
     std::optional<ToolData> get_tool_data(uint32_t tool_number);
     ActiveToolOffset select_tool(uint32_t tool_number);
     ActiveToolOffset active_tool_offset();
+    Error touch_off_tool(const TouchOffSpec& spec);
 
     CyclePlan build_threading_cycle(const ThreadingCycleSpec& spec);
     CyclePlan build_rough_turning_cycle(const RoughTurningCycleSpec& spec);
+    CyclePlan build_finishing_cycle(const FinishingCycleSpec& spec);
+    CyclePlan build_grooving_cycle(const GroovingCycleSpec& spec);
+    CyclePlan build_peck_drilling_cycle(const PeckDrillingCycleSpec& spec);
+    float spindle_revolutions(const FeedbackStatus& status);
+    float synchronized_thread_z(const ThreadingSyncState& state, float spindle_revolutions);
+    float synchronized_thread_progress(const ThreadingSyncState& state, float spindle_revolutions);
 }

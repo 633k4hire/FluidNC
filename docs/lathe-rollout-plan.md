@@ -487,9 +487,10 @@ Touch-off workflow documentation:
 
 Known limitations after Phase 4:
 
-- Tool data is fixed-size and in-memory only; persistent storage/UI editing remains future work.
+- Tool data is fixed-size and now persisted in NVS through the firmware API; firmware touch-off math is implemented, while operator-facing UI editing remains future work.
 - There is no G-code syntax yet for writing lathe tool table entries directly from a program.
 - Front/rear turret semantics are represented only by insert orientation at this stage.
+- Basic `G7`/`G8` diameter/radius programming is implemented for X words by converting programmed diameter values into internal machine-radius coordinates before normal offset/planner handling; hardware/CAM validation is still required.
 
 ### Phase 4 exit checklist
 
@@ -589,15 +590,19 @@ Implemented the first safe cycle layer as fixed-size expansion helpers rather th
 
 - Added a G76-style threading-cycle expansion helper that validates pitch, pass count, X/Z geometry, and expands into lower-level threading and rapid-return moves.
 - Added a rough-turning/finishing expansion helper that validates geometry/feed/depth and expands into lower-level linear roughing, return, and optional finish moves.
+- Added dedicated finishing, grooving, and peck-drilling expansion helpers with fixed-size motion output and geometry/feed validation.
 - Cycle plans use fixed-size move buffers to avoid unbounded allocation on ESP32-class targets.
 - Added fixture programs under `docs/lathe-fixtures/` showing realistic expanded threading and rough-turning workflows.
 - Existing status reports from Phases 2-4 expose lathe mode, CSS/fixed RPM state, G95, active tool offsets, and threading alarm state; Phase 5 documentation adds the `ESP421` WebUI/API lathe status endpoint and fallback WebUI panel.
 
 Known limitations after Phase 5:
 
+- The encoder feedback backend core and phase-to-Z threading trajectory helper exist, but ESP32-S3 GPIO/PCNT/RMT pin capture still needs to be wired into a concrete spindle backend.
+- Threading still needs final real-time step-generator integration so Z motion advances from live spindle phase rather than the normal planner timeline.
 - Cycle helpers are not yet wired to parser-level canned-cycle G-code execution. This is intentional until encoder-backed threading and persistent tool tables are validated on hardware.
-- `G76` syntax compatibility, roughing-cycle dialect choices, grooving, peck drilling, and WebUI editing remain future work.
+- `G76` syntax compatibility, roughing-cycle dialect choices, and WebUI editing remain future work.
 - Fixture programs document expanded lower-level motion rather than executing a new canned-cycle parser command.
+- Complete diameter/radius behavior now covers basic X-word programming, CSS diameter conversion, firmware touch-off math, and WebUI command endpoints for tool save/touch-off; the full operator editing screen still needs to wrap those commands before first-class release.
 
 ### Phase 5 exit checklist
 

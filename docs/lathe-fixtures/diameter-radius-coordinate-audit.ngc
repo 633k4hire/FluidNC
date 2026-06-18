@@ -1,0 +1,15 @@
+(FluidNC lathe diameter/radius coordinate-path audit fixture)
+(Use check mode or air-cut only. Assumes lathe mode is enabled.)
+G21 G90 G94 G7
+G0 X24.0 Z2.0       (Diameter input -> internal X radius 12.0)
+G10 L2 P1 X20.0 Z0  (Diameter-mode WCS X offset path)
+G54
+G92 X18.0           (Diameter-mode temporary offset path)
+G92.1
+(G38.2 X16.0 F50.0) (Probe path example; uncomment only with a configured probe)
+G71 X14.0 Z-10.0 Q2.0 F100.0
+G70 X13.8 Z-10.0 F80.0
+G75 X10.0 Z-5.0 Q1.0 F60.0
+G83 X0.0 Z-8.0 Q2.0 F50.0
+G8
+G0 X12.0 Z2.0       (Radius input remains internal X radius 12.0)

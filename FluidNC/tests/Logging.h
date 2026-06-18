@@ -10,6 +10,9 @@
 #include <string_view>
 
 class Channel;
+struct EnumItem;
+
+extern const EnumItem messageLevels2[];
 
 enum MsgLevel {
     MsgLevelNone    = 0,

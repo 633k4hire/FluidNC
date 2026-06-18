@@ -58,10 +58,36 @@
             <center><h2 id="MSG"></h2></center>
         </div>
         <div class="panel" id="LATHEPANEL">
-            <div class="panel-heading">Lathe Status</div>
+            <div class="panel-heading">Lathe Operator Dashboard</div>
             <div class="panel-body">
                 <input class="btn btn-primary" type="button" onclick="RefreshLatheStatus();" value="Refresh Lathe Status"/>
+                <div id="lathe_warnings" class="info">Lathe warnings have not been evaluated.</div>
                 <div id="lathe_status" class="info">Lathe status has not been loaded.</div>
+                <hr>
+                <h3>Lathe Tool Table Editor</h3>
+                <table>
+                    <tr><td>Tool</td><td><input class="form-control" id="lathe_tool_number" type="number" min="1" value="1"/></td></tr>
+                    <tr><td>Geometry X mm</td><td><input class="form-control" id="lathe_geometry_x" type="number" step="0.001" value="0"/></td></tr>
+                    <tr><td>Geometry Z mm</td><td><input class="form-control" id="lathe_geometry_z" type="number" step="0.001" value="0"/></td></tr>
+                    <tr><td>Wear X mm</td><td><input class="form-control" id="lathe_wear_x" type="number" step="0.001" value="0"/></td></tr>
+                    <tr><td>Wear Z mm</td><td><input class="form-control" id="lathe_wear_z" type="number" step="0.001" value="0"/></td></tr>
+                    <tr><td>Nose radius mm</td><td><input class="form-control" id="lathe_nose_radius" type="number" step="0.001" value="0"/></td></tr>
+                    <tr><td>Orientation</td><td><input class="form-control" id="lathe_orientation" type="number" min="0" max="4" value="0"/></td></tr>
+                </table>
+                <input class="btn btn-primary" type="button" onclick="SaveLatheTool();" value="Save Lathe Tool"/>
+                <div id="lathe_tool_result" class="info">Tool changes have not been sent.</div>
+                <hr>
+                <h3>Lathe Touch-Off</h3>
+                <table>
+                    <tr><td>Tool</td><td><input class="form-control" id="lathe_touch_tool" type="number" min="1" value="1"/></td></tr>
+                    <tr><td>X input mode</td><td><select class="form-control" id="lathe_touch_mode"><option value="radius">Radius (G8)</option><option value="diameter">Diameter (G7)</option></select></td></tr>
+                    <tr><td>Machine X mm</td><td><input class="form-control" id="lathe_machine_x" type="number" step="0.001"/></td></tr>
+                    <tr><td>Reference X mm</td><td><input class="form-control" id="lathe_reference_x" type="number" step="0.001"/></td></tr>
+                    <tr><td>Machine Z mm</td><td><input class="form-control" id="lathe_machine_z" type="number" step="0.001"/></td></tr>
+                    <tr><td>Reference Z mm</td><td><input class="form-control" id="lathe_reference_z" type="number" step="0.001"/></td></tr>
+                </table>
+                <input class="btn btn-primary" type="button" onclick="TouchOffLatheTool();" value="Touch Off Lathe Tool"/>
+                <div id="lathe_touch_result" class="info">Touch-off has not been sent.</div>
             </div>
         </div>
         <div class="panel hide_it" id="FILESYSTEM">

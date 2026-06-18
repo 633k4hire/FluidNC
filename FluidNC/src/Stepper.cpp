@@ -15,6 +15,7 @@
 #include "StepperPrivate.h"
 #include "Planner.h"
 #include "Protocol.h"
+#include <algorithm>
 #include <cmath>
 #include "Lathe.h"
 
@@ -558,12 +559,58 @@ void Stepper::prep_buffer() {
         float speed_var;                                            // Speed worker variable
         float mm_remaining = pl_block->millimeters;                 // New segment distance from end of block.
         float minimum_mm   = mm_remaining - prep.req_mm_increment;  // Guarantee at least one step.
+        bool  lathe_threading_segment = false;
 
         if (minimum_mm < 0.0) {
             minimum_mm = 0.0;
         }
 
-        do {
+        if (pl_block->lathe_threading.enabled) {
+            if (sys.step_control.executeHold) {
+                send_alarm(ExecAlarm::LatheSync);
+                sys.step_control.endMotion = true;
+                return;
+            }
+
+            const auto feedback = spindle->latheFeedback().status();
+            if (!Lathe::feedback_supports_threading(feedback)) {
+                send_alarm(ExecAlarm::LatheSync);
+                sys.step_control.endMotion = true;
+                return;
+            }
+
+            if (!pl_block->lathe_threading.synchronized) {
+                if (pl_block->lathe_threading.sync_index_count == 0) {
+                    pl_block->lathe_threading.sync_index_count = feedback.revolution_count + 1;
+                }
+                if (feedback.revolution_count < pl_block->lathe_threading.sync_index_count) {
+                    return;
+                }
+                pl_block->lathe_threading.start_spindle_revolutions = Lathe::spindle_revolutions(feedback);
+                pl_block->lathe_threading.synchronized = 1;
+            }
+
+            Lathe::ThreadingSyncState sync_state;
+            sync_state.start_z_mm = pl_block->lathe_threading.start_z_mm;
+            sync_state.end_z_mm   = pl_block->lathe_threading.target_z_mm;
+            sync_state.pitch_mm   = pl_block->lathe_threading.pitch_mm;
+            sync_state.start_spindle_revolutions = pl_block->lathe_threading.start_spindle_revolutions;
+
+            const float progress = Lathe::synchronized_thread_progress(sync_state, Lathe::spindle_revolutions(feedback));
+            const float target_mm_remaining = std::max(0.0f, pl_block->lathe_threading.path_length_mm * (1.0f - progress));
+            if (target_mm_remaining >= pl_block->millimeters) {
+                return;
+            }
+
+            mm_remaining = target_mm_remaining;
+            const float segment_mm = pl_block->millimeters - mm_remaining;
+            const float synchronized_feed = std::max(feedback.measured_rpm * pl_block->lathe_threading.pitch_mm, 1.0f);
+            dt = segment_mm / synchronized_feed;
+            prep.current_speed = synchronized_feed;
+            lathe_threading_segment = true;
+        }
+
+        if (!lathe_threading_segment) do {
             switch (prep.ramp_type) {
                 case RAMP_DECEL_OVERRIDE:
                     speed_var = pl_block->acceleration * time_var;

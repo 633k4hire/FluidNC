@@ -1,4 +1,5 @@
 #include "../src/Lathe.h"
+#include "../src/LatheEncoder.h"
 
 #include <gtest/gtest.h>
 
@@ -70,12 +71,75 @@ TEST(LatheScaffold, ThreadingFeedbackRequiresMeasuredRpmIndexAndAngularPosition)
     EXPECT_FALSE(Lathe::feedback_supports_threading(status));
 }
 
+TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
+    Lathe::EncoderSpindleFeedback feedback;
+    feedback.configure(100, 250);
+    feedback.set_commanded_rpm(600);
+    feedback.record_index(1000000);
+    feedback.record_pulse(1001000);
+    feedback.record_pulse(1002000);
+
+    auto status = feedback.status_at(1002);
+    EXPECT_TRUE(status.has_measured_rpm);
+    EXPECT_TRUE(status.has_index_pulse);
+    EXPECT_TRUE(status.has_angular_position);
+    EXPECT_FALSE(status.stale);
+    EXPECT_EQ(status.commanded_rpm, 600);
+    EXPECT_NEAR(status.measured_rpm, 600.0f, 0.001f);
+    EXPECT_NEAR(status.angular_position_rev, 0.03f, 0.001f);
+    EXPECT_TRUE(Lathe::feedback_supports_threading(status));
+
+    auto stale = feedback.status_at(2000);
+    EXPECT_TRUE(stale.stale);
+    EXPECT_FALSE(Lathe::feedback_supports_threading(stale));
+}
+
+
+TEST(LatheScaffold, ConfiguredEncoderFeedbackFallsBackToNullWhenInactive) {
+    EXPECT_FALSE(Lathe::encoder_capture_active());
+    auto status = Lathe::configured_spindle_feedback().status();
+    EXPECT_FALSE(status.has_measured_rpm);
+    EXPECT_FALSE(status.has_index_pulse);
+    EXPECT_FALSE(status.has_angular_position);
+}
+
 TEST(LatheScaffold, XOffsetConvertsDiameterModeToMachineRadiusOffset) {
     EXPECT_FLOAT_EQ(Lathe::x_offset_to_machine_mm(2.0f, Lathe::DiameterMode::Radius), 2.0f);
     EXPECT_FLOAT_EQ(Lathe::x_offset_to_machine_mm(2.0f, Lathe::DiameterMode::Diameter), 1.0f);
 }
 
+
+TEST(LatheScaffold, DiameterModeConversionPolicyCoversCoordinateAndCycleEntry) {
+    const float diameter_x = 24.0f;
+    const float internal_radius_x = Lathe::x_program_to_machine_mm(diameter_x, Lathe::DiameterMode::Diameter);
+
+    EXPECT_FLOAT_EQ(internal_radius_x, 12.0f);
+    EXPECT_FLOAT_EQ(Lathe::x_program_to_machine_mm(internal_radius_x, Lathe::DiameterMode::Radius), 12.0f);
+    EXPECT_FLOAT_EQ(Lathe::x_machine_to_diameter_mm(internal_radius_x), 24.0f);
+
+    Lathe::RoughTurningCycleSpec roughing;
+    roughing.start_x_mm = internal_radius_x;
+    roughing.final_x_mm = Lathe::x_program_to_machine_mm(20.0f, Lathe::DiameterMode::Diameter);
+    roughing.start_z_mm = 0.0f;
+    roughing.end_z_mm = -5.0f;
+    roughing.depth_step_mm = 1.0f;
+    roughing.rough_feed_mm_min = 100.0f;
+
+    auto plan = Lathe::build_rough_turning_cycle(roughing);
+    ASSERT_TRUE(plan.valid);
+    EXPECT_FLOAT_EQ(plan.moves[plan.count - 1].x_mm, 10.0f);
+}
+
+TEST(LatheScaffold, XDiameterProgrammingConvertsToInternalRadiusCoordinates) {
+    EXPECT_FLOAT_EQ(Lathe::x_program_to_machine_mm(24.0f, Lathe::DiameterMode::Diameter), 12.0f);
+    EXPECT_FLOAT_EQ(Lathe::x_program_to_machine_mm(12.0f, Lathe::DiameterMode::Radius), 12.0f);
+    EXPECT_FLOAT_EQ(Lathe::x_machine_to_diameter_mm(12.0f), 24.0f);
+    EXPECT_FLOAT_EQ(Lathe::x_machine_to_diameter_mm(-12.0f), 24.0f);
+}
+
 TEST(LatheScaffold, LatheToolDataStoresGeometryWearNoseAndOrientation) {
+    Lathe::clear_tool_table(false);
+
     Lathe::ToolData tool;
     tool.geometry_x_mm  = 1.0f;
     tool.geometry_z_mm  = 2.0f;
@@ -98,6 +162,43 @@ TEST(LatheScaffold, LatheToolDataStoresGeometryWearNoseAndOrientation) {
     EXPECT_FLOAT_EQ(active.x_mm, 1.1f);
     EXPECT_FLOAT_EQ(active.z_mm, 1.8f);
     EXPECT_FLOAT_EQ(active.nose_radius_mm, 0.4f);
+}
+
+TEST(LatheScaffold, LatheToolTableCanBeClearedWithoutPersisting) {
+    Lathe::ToolData tool;
+    tool.geometry_x_mm = 3.0f;
+
+    Lathe::set_tool_data(9, tool);
+    ASSERT_TRUE(Lathe::get_tool_data(9).has_value());
+
+    Lathe::clear_tool_table(false);
+    EXPECT_FALSE(Lathe::get_tool_data(9).has_value());
+}
+
+TEST(LatheScaffold, TouchOffCalculatesGeometryOffsetsAndPreservesWear) {
+    Lathe::clear_tool_table(false);
+
+    Lathe::ToolData tool;
+    tool.wear_x_mm = 0.2f;
+    tool.wear_z_mm = -0.1f;
+    Lathe::set_tool_data(11, tool);
+
+    Lathe::TouchOffSpec spec;
+    spec.tool_number    = 11;
+    spec.machine_x_mm   = 10.0f;
+    spec.machine_z_mm   = -4.0f;
+    spec.reference_x_mm = 24.0f;
+    spec.reference_z_mm = 0.0f;
+    spec.x_mode         = Lathe::DiameterMode::Diameter;
+
+    EXPECT_EQ(Lathe::touch_off_tool(spec), Error::Ok);
+
+    auto stored = Lathe::get_tool_data(11);
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_FLOAT_EQ(stored->geometry_x_mm, 1.8f);
+    EXPECT_FLOAT_EQ(stored->geometry_z_mm, 4.1f);
+    EXPECT_FLOAT_EQ(stored->wear_x_mm, 0.2f);
+    EXPECT_FLOAT_EQ(stored->wear_z_mm, -0.1f);
 }
 
 TEST(LatheScaffold, ThreadingCycleExpandsIntoThreadingPassesAndRetracts) {
@@ -151,4 +252,76 @@ TEST(LatheScaffold, CycleValidationRejectsUnsafeGeometry) {
     roughing.depth_step_mm     = 0.0f;
     roughing.rough_feed_mm_min = 100.0f;
     EXPECT_FALSE(Lathe::build_rough_turning_cycle(roughing).valid);
+}
+
+TEST(LatheScaffold, FinishingCycleBuildsSingleFinishMove) {
+    Lathe::FinishingCycleSpec spec;
+    spec.start_x_mm  = 26.0f;
+    spec.end_x_mm    = 25.8f;
+    spec.start_z_mm  = 0.0f;
+    spec.end_z_mm    = -20.0f;
+    spec.feed_mm_min = 80.0f;
+
+    auto plan = Lathe::build_finishing_cycle(spec);
+    ASSERT_TRUE(plan.valid);
+    EXPECT_EQ(plan.count, 1u);
+    EXPECT_EQ(plan.moves[0].kind, Lathe::CycleMoveKind::Linear);
+    EXPECT_FLOAT_EQ(plan.moves[0].x_mm, 25.8f);
+    EXPECT_FLOAT_EQ(plan.moves[0].z_mm, -20.0f);
+}
+
+TEST(LatheScaffold, GroovingCyclePecksAndRetracts) {
+    Lathe::GroovingCycleSpec spec;
+    spec.start_x_mm    = 20.0f;
+    spec.final_x_mm    = 16.0f;
+    spec.z_mm          = -5.0f;
+    spec.peck_depth_mm = 2.0f;
+    spec.feed_mm_min   = 60.0f;
+
+    auto plan = Lathe::build_grooving_cycle(spec);
+    ASSERT_TRUE(plan.valid);
+    EXPECT_EQ(plan.count, 3u);
+    EXPECT_FLOAT_EQ(plan.moves[0].x_mm, 18.0f);
+    EXPECT_EQ(plan.moves[1].kind, Lathe::CycleMoveKind::Rapid);
+    EXPECT_FLOAT_EQ(plan.moves[2].x_mm, 16.0f);
+}
+
+TEST(LatheScaffold, PeckDrillingCyclePecksAlongZAndRetracts) {
+    Lathe::PeckDrillingCycleSpec spec;
+    spec.x_mm          = 0.0f;
+    spec.start_z_mm    = 1.0f;
+    spec.final_z_mm    = -5.0f;
+    spec.peck_depth_mm = 3.0f;
+    spec.feed_mm_min   = 50.0f;
+
+    auto plan = Lathe::build_peck_drilling_cycle(spec);
+    ASSERT_TRUE(plan.valid);
+    EXPECT_EQ(plan.count, 3u);
+    EXPECT_FLOAT_EQ(plan.moves[0].z_mm, -2.0f);
+    EXPECT_EQ(plan.moves[1].kind, Lathe::CycleMoveKind::Rapid);
+    EXPECT_FLOAT_EQ(plan.moves[2].z_mm, -5.0f);
+}
+
+
+TEST(LatheScaffold, SynchronizedThreadingProgressUsesStartRevolutionOffset) {
+    Lathe::ThreadingSyncState state;
+    state.start_z_mm = 0.0f;
+    state.end_z_mm   = -10.0f;
+    state.pitch_mm   = 2.0f;
+    state.start_spindle_revolutions = 4.0f;
+
+    EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 4.0f), 0.0f);
+    EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 6.0f), -4.0f);
+    EXPECT_NEAR(Lathe::synchronized_thread_progress(state, 6.0f), 0.4f, 0.001f);
+}
+
+TEST(LatheScaffold, SynchronizedThreadingTrajectoryFollowsSpindleRevolutions) {
+    Lathe::ThreadingSyncState state;
+    state.start_z_mm = 0.0f;
+    state.end_z_mm   = -10.0f;
+    state.pitch_mm   = 1.5f;
+
+    EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 0.0f), 0.0f);
+    EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 2.0f), -3.0f);
+    EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 100.0f), -10.0f);
 }

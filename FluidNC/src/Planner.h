@@ -26,8 +26,14 @@ struct LatheCssPlanData {
 
 struct LatheThreadingPlanData {
     uint8_t enabled : 1;
+    uint8_t synchronized : 1;
     float   pitch_mm;
     float   start_rpm;
+    float   start_z_mm;
+    float   target_z_mm;
+    float   path_length_mm;
+    float   start_spindle_revolutions;
+    uint32_t sync_index_count;
 };
 
 struct PlMotion {

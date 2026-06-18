@@ -42,14 +42,15 @@ enum class ModalGroup : uint8_t {
     MG12 = 9,   // [G54,G55,G56,G57,G58,G59] Coordinate system selection
     MG13 = 10,  // [G61] Control mode
     MG14 = 11,  // [G96,G97] Lathe spindle speed mode
+    MG15 = 12,  // [G7,G8] Lathe diameter/radius mode
     // Table 6. M-code Modal Groups
-    MM4  = 12,  // [M0,M1,M2,M30] Stopping
-    MM5  = 13,  // [M62,M63,M64,M65,M66,M67,M68] Digital/analog output/input
-    MM6  = 14,  // [M6] [M61] Tool change
-    MM7  = 15,  // [M3,M4,M5] Spindle turning
-    MM8  = 16,  // [M7,M8,M9] Coolant control
-    MM9  = 17,  // [M56] Override control
-    MM10 = 18,  // [M100-M199] User Defined
+    MM4  = 13,  // [M0,M1,M2,M30] Stopping
+    MM5  = 14,  // [M62,M63,M64,M65,M66,M67,M68] Digital/analog output/input
+    MM6  = 15,  // [M6] [M61] Tool change
+    MM7  = 16,  // [M3,M4,M5] Spindle turning
+    MM8  = 17,  // [M7,M8,M9] Coolant control
+    MM9  = 18,  // [M56] Override control
+    MM10 = 19,  // [M100-M199] User Defined
 };
 
 // Command actions for within execution-type modal groups (motion, stopping, non-modal). Used
@@ -81,6 +82,11 @@ enum class Motion : gcodenum_t {
     CwArc              = 20,   // G2
     CcwArc             = 30,   // G3
     Threading          = 330,  // G32/G33 lathe synchronized threading primitive
+    LatheFinishingCycle = 700, // G70 lathe finishing cycle
+    LatheRoughingCycle  = 710, // G71 lathe rough turning/facing cycle
+    LatheGroovingCycle  = 750, // G75 lathe grooving cycle
+    LatheThreadingCycle = 760, // G76 lathe threading canned cycle
+    LathePeckCycle      = 830, // G83 lathe peck drilling/boring cycle
     ProbeToward        = 382,  // G38.2
     ProbeTowardNoError = 383,  // G38.3
     ProbeAway          = 384,  // G38.4
@@ -283,7 +289,7 @@ struct gc_modal_t {
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}
     Lathe::SpindleSpeedMode lathe_spindle_speed_mode;  // {G96,G97}
-    Lathe::DiameterMode     lathe_diameter_mode;       // {G7,G8} scaffold only
+    Lathe::DiameterMode     lathe_diameter_mode;       // {G7,G8}
 };
 
 struct gc_values_t {

@@ -2,7 +2,10 @@
 # web page that is used when index.html.gz is missing
 # NoFile.h is created from the code in <FluidNC>/embedded
 
-import subprocess, sys
+import os
+import shutil
+import subprocess
+import sys
 
 header = """// Embedded web page to load the index,html.gz for ESP3D-WEBUI.
 // Generated from the code in <FluidNC>/embedded/ .  Do not edit manually.
@@ -28,9 +31,23 @@ def bin2header(data, var_name='var'):
     out.append('unsigned int {var_name}_SIZE = {data_len};'.format(var_name=var_name, data_len=len(data)))
     return '\n'.join(out) + '\n'
 
-subprocess.run(["npm", "install"])
-subprocess.run(["npm", "audit", "fix"])
-subprocess.run(["gulp", "package"])
+def find_command(name):
+    suffix = '.cmd' if os.name == 'nt' else ''
+    local = os.path.join(os.getcwd(), 'node_modules', '.bin', name + suffix)
+    if os.path.exists(local):
+        return local
+
+    found = shutil.which(name + suffix) or shutil.which(name)
+    if found:
+        return found
+
+    raise FileNotFoundError(name)
+
+
+npm = find_command('npm')
+subprocess.run([npm, "install"], check=True)
+subprocess.run([npm, "audit", "fix"])
+subprocess.run([find_command('gulp'), "package"], check=True)
 
 with open('tool.html.gz', 'rb') as f:
     data = f.read()

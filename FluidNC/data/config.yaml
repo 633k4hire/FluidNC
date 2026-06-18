@@ -166,3 +166,7 @@ lathe:
   x_axis: 0
   z_axis: 2
   feedback_stale_ms: 250
+  encoder_enable: false
+  encoder_pulse_pin: NO_PIN
+  encoder_index_pin: NO_PIN
+  encoder_pulses_per_rev: 1

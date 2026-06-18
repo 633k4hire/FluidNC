@@ -456,6 +456,38 @@ Error gc_execute_line(const char* input_line) {
                         gc_block.modal.motion = Motion::Threading;
                         mg_word_bit           = ModalGroup::MG1;
                         break;
+                    case 70:
+                    case 71:
+                    case 75:
+                    case 83:
+                    case 76:
+                        if (mantissa != 0) {
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        if (!Lathe::enabled()) {
+                            log_info("Lathe canned cycles require lathe mode to be enabled");
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        if (int_value == 76) {
+                            if (auto err = Lathe::validate_feature(Lathe::Feature::Threading); err != Error::Ok) {
+                                return err;
+                            }
+                            gc_block.modal.motion = Motion::LatheThreadingCycle;
+                        } else if (int_value == 70) {
+                            gc_block.modal.motion = Motion::LatheFinishingCycle;
+                        } else if (int_value == 71) {
+                            gc_block.modal.motion = Motion::LatheRoughingCycle;
+                        } else if (int_value == 75) {
+                            gc_block.modal.motion = Motion::LatheGroovingCycle;
+                        } else {
+                            gc_block.modal.motion = Motion::LathePeckCycle;
+                        }
+                        if (axis_command != AxisCommand::None) {
+                            return Error::GcodeAxisCommandConflict;
+                        }
+                        axis_command = AxisCommand::MotionMode;
+                        mg_word_bit  = ModalGroup::MG1;
+                        break;
                     case 38:  // G38 - probe
                         //only allow G38 "Probe" commands if a probe pin is defined.
                         if (!config->_probe->exists()) {
@@ -574,9 +606,21 @@ Error gc_execute_line(const char* input_line) {
                         mg_word_bit                             = ModalGroup::MG14;
                         break;
                     case 7:
+                        if (!Lathe::enabled()) {
+                            log_info("Lathe diameter mode (G7) requires the machine/lathe configuration section to be enabled");
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        gc_block.modal.lathe_diameter_mode = Lathe::DiameterMode::Diameter;
+                        mg_word_bit                        = ModalGroup::MG15;
+                        break;
                     case 8:
-                        log_info("Lathe diameter/radius mode (G7/G8) is scaffolded but not implemented");
-                        return Error::GcodeUnsupportedCommand;
+                        if (!Lathe::enabled()) {
+                            log_info("Lathe radius mode (G8) requires the machine/lathe configuration section to be enabled");
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        gc_block.modal.lathe_diameter_mode = Lathe::DiameterMode::Radius;
+                        mg_word_bit                        = ModalGroup::MG15;
+                        break;
                     case 94:
                         gc_block.modal.feed_rate = FeedRate::UnitsPerMin;
                         mg_word_bit              = ModalGroup::MG5;
@@ -1205,6 +1249,10 @@ Error gc_execute_line(const char* input_line) {
             }
         }
     }
+    if (!nonmodalG38 && Lathe::enabled() && gc_block.modal.lathe_diameter_mode == Lathe::DiameterMode::Diameter &&
+        bitnum_is_true(axis_words, Lathe::x_axis())) {
+        gc_block.values.xyz[Lathe::x_axis()] = Lathe::x_program_to_machine_mm(gc_block.values.xyz[Lathe::x_axis()], gc_block.modal.lathe_diameter_mode);
+    }
 
     // [13. Cutter radius compensation ]: G41/42 NOT SUPPORTED. Error, if enabled while G53 is active.
     // [G40 Errors]: G2/3 arc is programmed after a G40. The linear move after disabling is less than tool diameter.
@@ -1418,9 +1466,61 @@ Error gc_execute_line(const char* input_line) {
                         axis_command = AxisCommand::None;
                     }
                     break;
+                case Motion::LatheRoughingCycle:
+                    if (bitnum_is_false(axis_words, Lathe::x_axis()) || bitnum_is_false(axis_words, Lathe::z_axis()) || bitnum_is_false(value_words, GCodeWord::Q)) {
+                        log_info("Lathe G71 requires X, Z, and Q depth-step words");
+                        return Error::GcodeValueWordMissing;
+                    }
+                    if (gc_block.values.q <= 0.0f) {
+                        return Error::GcodeValueWordInvalid;
+                    }
+                    clear_bitnum(value_words, GCodeWord::Q);
+                    clear_bitnum(value_words, GCodeWord::L);
+                    break;
+                case Motion::LatheFinishingCycle:
+                    if (bitnum_is_false(axis_words, Lathe::x_axis()) || bitnum_is_false(axis_words, Lathe::z_axis())) {
+                        log_info("Lathe G70 requires X and Z final position words");
+                        return Error::GcodeValueWordMissing;
+                    }
+                    break;
+                case Motion::LatheGroovingCycle:
+                    if (bitnum_is_false(axis_words, Lathe::x_axis()) || bitnum_is_false(axis_words, Lathe::z_axis()) || bitnum_is_false(value_words, GCodeWord::Q)) {
+                        log_info("Lathe G75 requires X, Z, and Q peck-depth words");
+                        return Error::GcodeValueWordMissing;
+                    }
+                    if (gc_block.values.q <= 0.0f) {
+                        return Error::GcodeValueWordInvalid;
+                    }
+                    clear_bitnum(value_words, GCodeWord::Q);
+                    break;
+                case Motion::LathePeckCycle:
+                    if (bitnum_is_false(axis_words, Lathe::z_axis()) || bitnum_is_false(value_words, GCodeWord::Q)) {
+                        log_info("Lathe G83 requires Z final depth and Q peck-depth words");
+                        return Error::GcodeValueWordMissing;
+                    }
+                    if (gc_block.values.q <= 0.0f) {
+                        return Error::GcodeValueWordInvalid;
+                    }
+                    clear_bitnum(value_words, GCodeWord::Q);
+                    break;
+                case Motion::LatheThreadingCycle:
+                    if (bitnum_is_false(axis_words, Lathe::x_axis()) || bitnum_is_false(axis_words, Lathe::z_axis())) {
+                        log_info("Lathe G76 requires X and Z final position words");
+                        return Error::GcodeValueWordMissing;
+                    }
+                    if (bitnum_is_false(value_words, GCodeWord::P) || gc_block.values.p < 1.0f || truncf(gc_block.values.p) != gc_block.values.p || gc_block.values.p > 255.0f) {
+                        log_info("Lathe G76 requires integer P pass count from 1 to 255");
+                        return Error::GcodeValueWordInvalid;
+                    }
+                    clear_bitnum(value_words, GCodeWord::P);
+                    [[fallthrough]];
                 case Motion::Threading:
                     if (!axis_words) {
                         return Error::GcodeNoAxisWords;
+                    }
+                    if (!bitnum_is_true(axis_words, Lathe::z_axis())) {
+                        log_info("Lathe threading requires Z-axis motion for phase-synchronized pitch control");
+                        return Error::GcodeUnsupportedCommand;
                     }
                     if (gc_block.modal.feed_rate != FeedRate::UnitsPerRev) {
                         log_info("Lathe threading requires G95 feed-per-revolution mode");
@@ -1724,7 +1824,7 @@ Error gc_execute_line(const char* input_line) {
     const auto next_lathe_spindle_mode = gc_block.modal.lathe_spindle_speed_mode;
     float requested_spindle_rpm = gc_block.values.s;
     if (next_lathe_spindle_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed) {
-        const float current_diameter = fabsf(gc_state.position[Lathe::x_axis()]);
+        const float current_diameter = Lathe::x_machine_to_diameter_mm(gc_state.position[Lathe::x_axis()]);
         requested_spindle_rpm = Lathe::clamp_css_rpm(
             Lathe::css_rpm_from_diameter_mm(gc_block.values.s, current_diameter, gc_block.modal.units == Units::Inches));
     }
@@ -1992,8 +2092,8 @@ Error gc_execute_line(const char* input_line) {
     if (gc_state.modal.lathe_spindle_speed_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed && axis_command == AxisCommand::MotionMode) {
         pl_data->lathe_css.enabled            = 1;
         pl_data->lathe_css.surface_speed      = gc_state.spindle_speed;
-        pl_data->lathe_css.start_diameter_mm  = fabsf(gc_state.position[Lathe::x_axis()]);
-        pl_data->lathe_css.target_diameter_mm = fabsf(gc_block.values.xyz[Lathe::x_axis()]);
+        pl_data->lathe_css.start_diameter_mm  = Lathe::x_machine_to_diameter_mm(gc_state.position[Lathe::x_axis()]);
+        pl_data->lathe_css.target_diameter_mm = Lathe::x_machine_to_diameter_mm(gc_block.values.xyz[Lathe::x_axis()]);
         pl_data->lathe_css.max_rpm            = Lathe::max_css_rpm();
     }
     if (gc_state.modal.motion == Motion::Threading) {
@@ -2006,15 +2106,105 @@ Error gc_execute_line(const char* input_line) {
             send_alarm(ExecAlarm::LatheSync);
             return Error::GcodeUnsupportedCommand;
         }
-        pl_data->lathe_threading.enabled   = 1;
-        pl_data->lathe_threading.pitch_mm  = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
-        pl_data->lathe_threading.start_rpm = threading_feedback.measured_rpm;
-        pl_data->motion.noFeedOverride     = 1;
+        pl_data->lathe_threading.enabled      = 1;
+        pl_data->lathe_threading.synchronized = 0;
+        pl_data->lathe_threading.pitch_mm     = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
+        pl_data->lathe_threading.start_rpm    = threading_feedback.measured_rpm;
+        pl_data->lathe_threading.start_z_mm   = gc_state.position[Lathe::z_axis()];
+        pl_data->lathe_threading.target_z_mm  = gc_block.values.xyz[Lathe::z_axis()];
+        pl_data->lathe_threading.start_spindle_revolutions = 0.0f;
+        pl_data->lathe_threading.sync_index_count = 0;
+        pl_data->motion.noFeedOverride        = 1;
     }
     if (gc_state.modal.motion != Motion::None) {
         if (axis_command == AxisCommand::MotionMode) {
             GCUpdatePos gc_update_pos = GCUpdatePos::Target;
-            if (gc_state.modal.motion == Motion::Linear || gc_state.modal.motion == Motion::Threading) {
+            if (gc_state.modal.motion == Motion::LatheRoughingCycle || gc_state.modal.motion == Motion::LatheFinishingCycle ||
+                gc_state.modal.motion == Motion::LatheGroovingCycle || gc_state.modal.motion == Motion::LathePeckCycle ||
+                gc_state.modal.motion == Motion::LatheThreadingCycle) {
+                Lathe::CyclePlan cycle_plan;
+                if (gc_state.modal.motion == Motion::LatheRoughingCycle) {
+                    Lathe::RoughTurningCycleSpec cycle_spec;
+                    cycle_spec.start_x_mm = gc_state.position[Lathe::x_axis()];
+                    cycle_spec.final_x_mm = gc_block.values.xyz[Lathe::x_axis()];
+                    cycle_spec.start_z_mm = gc_state.position[Lathe::z_axis()];
+                    cycle_spec.end_z_mm   = gc_block.values.xyz[Lathe::z_axis()];
+                    cycle_spec.depth_step_mm = gc_block.values.q;
+                    cycle_spec.rough_feed_mm_min = pl_data->feed_rate;
+                    cycle_spec.include_finish_pass = gc_block.values.l != 0;
+                    cycle_plan = Lathe::build_rough_turning_cycle(cycle_spec);
+                } else if (gc_state.modal.motion == Motion::LatheFinishingCycle) {
+                    Lathe::FinishingCycleSpec cycle_spec;
+                    cycle_spec.start_x_mm = gc_state.position[Lathe::x_axis()];
+                    cycle_spec.end_x_mm   = gc_block.values.xyz[Lathe::x_axis()];
+                    cycle_spec.start_z_mm = gc_state.position[Lathe::z_axis()];
+                    cycle_spec.end_z_mm   = gc_block.values.xyz[Lathe::z_axis()];
+                    cycle_spec.feed_mm_min = pl_data->feed_rate;
+                    cycle_plan = Lathe::build_finishing_cycle(cycle_spec);
+                } else if (gc_state.modal.motion == Motion::LatheGroovingCycle) {
+                    Lathe::GroovingCycleSpec cycle_spec;
+                    cycle_spec.start_x_mm = gc_state.position[Lathe::x_axis()];
+                    cycle_spec.final_x_mm = gc_block.values.xyz[Lathe::x_axis()];
+                    cycle_spec.z_mm       = gc_block.values.xyz[Lathe::z_axis()];
+                    cycle_spec.peck_depth_mm = gc_block.values.q;
+                    cycle_spec.feed_mm_min = pl_data->feed_rate;
+                    cycle_plan = Lathe::build_grooving_cycle(cycle_spec);
+                } else if (gc_state.modal.motion == Motion::LathePeckCycle) {
+                    Lathe::PeckDrillingCycleSpec cycle_spec;
+                    cycle_spec.x_mm       = bitnum_is_true(axis_words, Lathe::x_axis()) ? gc_block.values.xyz[Lathe::x_axis()] : gc_state.position[Lathe::x_axis()];
+                    cycle_spec.start_z_mm = gc_state.position[Lathe::z_axis()];
+                    cycle_spec.final_z_mm = gc_block.values.xyz[Lathe::z_axis()];
+                    cycle_spec.peck_depth_mm = gc_block.values.q;
+                    cycle_spec.feed_mm_min = pl_data->feed_rate;
+                    cycle_plan = Lathe::build_peck_drilling_cycle(cycle_spec);
+                } else {
+                    Lathe::ThreadingCycleSpec cycle_spec;
+                    cycle_spec.start_x_mm = gc_state.position[Lathe::x_axis()];
+                    cycle_spec.end_x_mm   = gc_block.values.xyz[Lathe::x_axis()];
+                    cycle_spec.start_z_mm = gc_state.position[Lathe::z_axis()];
+                    cycle_spec.end_z_mm   = gc_block.values.xyz[Lathe::z_axis()];
+                    cycle_spec.pitch_mm   = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
+                    cycle_spec.passes     = static_cast<uint8_t>(gc_block.values.p);
+                    cycle_plan = Lathe::build_threading_cycle(cycle_spec);
+                }
+                if (!cycle_plan.valid) {
+                    return cycle_plan.error;
+                }
+                float cycle_position[MAX_N_AXIS];
+                copyAxes(cycle_position, gc_state.position);
+                for (size_t move_index = 0; move_index < cycle_plan.count; ++move_index) {
+                    plan_line_data_t cycle_pl_data = *pl_data;
+                    cycle_pl_data.lathe_css = {};
+                    cycle_pl_data.lathe_threading = {};
+                    cycle_pl_data.motion.rapidMotion = 0;
+                    float cycle_target[MAX_N_AXIS];
+                    copyAxes(cycle_target, cycle_position);
+                    cycle_target[Lathe::x_axis()] = cycle_plan.moves[move_index].x_mm;
+                    cycle_target[Lathe::z_axis()] = cycle_plan.moves[move_index].z_mm;
+                    if (cycle_plan.moves[move_index].kind == Lathe::CycleMoveKind::Rapid) {
+                        cycle_pl_data.motion.rapidMotion = 1;
+                    } else if (cycle_plan.moves[move_index].kind == Lathe::CycleMoveKind::Threading) {
+                        const auto threading_feedback = spindle->latheFeedback().status();
+                        if (!Lathe::feedback_supports_threading(threading_feedback) || !spindle->latheFeedback().synchronize_for_threading_start()) {
+                            send_alarm(ExecAlarm::LatheSync);
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        cycle_pl_data.motion.noFeedOverride = 1;
+                        cycle_pl_data.lathe_threading.enabled = 1;
+                        cycle_pl_data.lathe_threading.synchronized = 0;
+                        cycle_pl_data.lathe_threading.pitch_mm = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
+                        cycle_pl_data.lathe_threading.start_rpm = threading_feedback.measured_rpm;
+                        cycle_pl_data.lathe_threading.start_z_mm = cycle_position[Lathe::z_axis()];
+                        cycle_pl_data.lathe_threading.target_z_mm = cycle_target[Lathe::z_axis()];
+                    }
+                    if (!mc_linear(cycle_target, &cycle_pl_data, cycle_position)) {
+                        return Error::GcodeValueWordInvalid;
+                    }
+                    copyAxes(cycle_position, cycle_target);
+                }
+                copyAxes(gc_block.values.xyz, cycle_position);
+                gc_state.modal.motion = Motion::Linear;
+            } else if (gc_state.modal.motion == Motion::Linear || gc_state.modal.motion == Motion::Threading) {
                 mc_linear(gc_block.values.xyz, pl_data, gc_state.position);
             } else if (gc_state.modal.motion == Motion::Seek) {
                 pl_data->motion.rapidMotion = 1;  // Set rapid motion flag.

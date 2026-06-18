@@ -1,0 +1,9 @@
+(FluidNC lathe G76 single-line threading cycle example)
+(Requires lathe.enable, enable_threading, encoder_enable and healthy index/phase feedback)
+G21 G90 G95 G8
+M3 S600
+G0 X20.0 Z2.0
+(G76 X<final radius> Z<thread end> P<passes> F<pitch mm/rev>)
+G76 X18.0 Z-12.0 P4 F1.5
+G0 X22.0 Z5.0
+M5

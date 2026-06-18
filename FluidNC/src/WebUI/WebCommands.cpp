@@ -14,12 +14,14 @@
 #include "Report.h"  // git_info
 #include "GCode.h"
 #include "Lathe.h"
+#include "LatheEncoder.h"
 #include "Spindles/Spindle.h"
 
 #include <Esp.h>
 
 #include <sstream>
 #include <iomanip>
+#include <cstdlib>
 
 #include "Module.h"
 
@@ -158,6 +160,9 @@ namespace WebUI {
             j.id_value_object("Effective RPM", float_string(gc_state.lathe_commanded_rpm));
             j.id_value_object("CSS clamp RPM", float_string(Lathe::max_css_rpm()));
             j.id_value_object("Minimum CSS diameter mm", float_string(Lathe::min_css_diameter_mm()));
+            j.id_value_object("Encoder enabled", Lathe::encoder_enabled() ? "true" : "false");
+            j.id_value_object("Encoder capture active", Lathe::encoder_capture_active() ? "true" : "false");
+            j.id_value_object("Encoder pulses/rev", int32_t(Lathe::encoder_pulses_per_revolution()));
 
             auto tool = Lathe::active_tool_offset();
             j.id_value_object("Active lathe tool", tool.valid ? int32_t(tool.tool_number) : int32_t(0));
@@ -169,12 +174,82 @@ namespace WebUI {
             j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
             j.id_value_object("Feedback index", feedback.has_index_pulse ? "true" : "false");
             j.id_value_object("Feedback angular position", feedback.has_angular_position ? "true" : "false");
+            j.id_value_object("Feedback angular rev", feedback.has_angular_position ? float_string(feedback.angular_position_rev) : "not available");
+            j.id_value_object("Feedback revolution count", int32_t(feedback.revolution_count));
             j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
             j.id_value_object("Feedback fault", feedback.fault ? "true" : "false");
 
             j.end_array();
             j.end();
             return Error::Ok;
+        }
+
+        static bool get_float_param(const char* parameter, const char* key, float& value) {
+            std::string text;
+            if (!get_param(parameter, key, text)) {
+                return false;
+            }
+            char* end = nullptr;
+            value = strtof(text.c_str(), &end);
+            return end != text.c_str();
+        }
+
+        static bool get_uint_param(const char* parameter, const char* key, uint32_t& value) {
+            std::string text;
+            if (!get_param(parameter, key, text)) {
+                return false;
+            }
+            char* end = nullptr;
+            value = strtoul(text.c_str(), &end, 10);
+            return end != text.c_str();
+        }
+
+        static Error setLatheToolJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP422
+            uint32_t tool_number = 0;
+            if (!get_uint_param(parameter, "T=", tool_number) || tool_number == 0) {
+                send_json_command_response(out, 422, false, errorString(Error::InvalidValue));
+                return Error::InvalidValue;
+            }
+
+            Lathe::ToolData tool;
+            if (auto existing = Lathe::get_tool_data(tool_number)) {
+                tool = *existing;
+            }
+
+            get_float_param(parameter, "GX=", tool.geometry_x_mm);
+            get_float_param(parameter, "GZ=", tool.geometry_z_mm);
+            get_float_param(parameter, "WX=", tool.wear_x_mm);
+            get_float_param(parameter, "WZ=", tool.wear_z_mm);
+            get_float_param(parameter, "NR=", tool.nose_radius_mm);
+
+            uint32_t orientation = 0;
+            if (get_uint_param(parameter, "O=", orientation)) {
+                tool.orientation = static_cast<Lathe::InsertOrientation>(orientation);
+            }
+
+            Lathe::set_tool_data(tool_number, tool);
+            send_json_command_response(out, 422, true, "lathe tool saved");
+            return Error::Ok;
+        }
+
+        static Error touchOffLatheToolJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP423
+            Lathe::TouchOffSpec spec;
+            if (!get_uint_param(parameter, "T=", spec.tool_number) || spec.tool_number == 0) {
+                send_json_command_response(out, 423, false, errorString(Error::InvalidValue));
+                return Error::InvalidValue;
+            }
+
+            spec.set_x = get_float_param(parameter, "MX=", spec.machine_x_mm) && get_float_param(parameter, "RX=", spec.reference_x_mm);
+            spec.set_z = get_float_param(parameter, "MZ=", spec.machine_z_mm) && get_float_param(parameter, "RZ=", spec.reference_z_mm);
+
+            std::string mode;
+            if (get_param(parameter, "MODE=", mode) && (mode == "diameter" || mode == "G7" || mode == "g7")) {
+                spec.x_mode = Lathe::DiameterMode::Diameter;
+            }
+
+            Error err = Lathe::touch_off_tool(spec);
+            send_json_command_response(out, 423, err == Error::Ok, err == Error::Ok ? "lathe tool touched off" : errorString(err));
+            return err;
         }
 
         static Error showSysStats(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP420
@@ -314,6 +389,8 @@ namespace WebUI {
             // WA - need admin password to set
             new WebCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
             new WebCommand(NULL, WEBCMD, WU, "ESP421", "System/Lathe", showLatheStatusJSON, anyState);
+            new WebCommand("T=tool [GX=x] [GZ=z] [WX=x] [WZ=z] [NR=r] [O=orientation]", WEBCMD, WA, "ESP422", "Lathe/ToolSet", setLatheToolJSON, anyState);
+            new WebCommand("T=tool [MX=x RX=x MODE=diameter|radius] [MZ=z RZ=z]", WEBCMD, WA, "ESP423", "Lathe/TouchOff", touchOffLatheToolJSON, anyState);
             new WebCommand("RESTART", WEBCMD, WA, "ESP444", "System/Control", setSystemMode);
 
             //      new WebCommand("ON|OFF", WEBCMD, WA, "ESP115", "Radio/State", setRadioState);
