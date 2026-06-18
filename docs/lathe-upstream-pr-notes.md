@@ -198,6 +198,7 @@ New WebUI commands:
 - `ESP421` - lathe status JSON.
 - `ESP422` - save lathe tool data.
 - `ESP423` - perform lathe tool touch-off.
+- `ESP424` - home/verify the Maijker turret when an index sensor is configured.
 
 `ESP421` reports:
 
@@ -209,6 +210,7 @@ New WebUI commands:
 - CSS clamp and minimum CSS diameter;
 - encoder enabled/capture state and pulses per revolution;
 - active lathe tool offset/nose data;
+- Maijker turret configured/current/target/confirmed/sensor/error state;
 - spindle feedback measured RPM, index, angular position, revolution count,
   stale state, and fault state.
 
@@ -221,29 +223,33 @@ instead of parsing free-form status text.
 Primary files:
 
 - `example_configs/maijker_xzact_mini_lathe.yaml`
-- `example_configs/maijker_tool_change.gcode`
+- `docs/legacy/maijker_tool_change_legacy.gcode`
 
 The Maijker/XZA config targets an MKS-DLC32 V2.1 mini-lathe build and includes:
 
-- X/Z axes plus a turret A axis;
+- X/Z axes plus the existing commanded C axis;
 - pendant UART configuration;
 - spindle PWM configuration;
-- 5-tool turret M6 macro hookup;
+- first-class `maijker_5_station_turret` ATC hookup for `Tn` + `M6`;
 - lathe config block with CSS/feed-per-rev enabled;
 - threading and encoder capture left disabled with `NO_PIN` placeholders.
 
-The turret macro assumes:
+The Maijker turret ATC driver:
 
-- machine starts with tool 1 in position;
-- M6 commands use `T1` through `T5`;
-- `#<current_tool>` is initialized before the first automatic tool change after
-  boot.
+- uses `i2so.7` for step and `gpio.5` for direction;
+- requires a confirmed current tool from config, `M61Qn`, or future sensor home;
+- indexes forward, then reverses by the configured lock/backoff steps;
+- reports current/target/confirmed/sensor/error state through `ESP421`.
+
+The legacy macro is retained only as a reference for the original fake-A-axis
+and `M62`/`M63` workaround.
 
 ## Tests and Fixtures
 
 Primary files:
 
 - `FluidNC/tests/test_unit/LatheScaffoldTest.cpp`
+- `FluidNC/tests/test_unit/MaijkerTurretLogicTest.cpp`
 - `FluidNC/tests/test_unit/LatheTestStubs.cpp`
 - `FluidNC/tests/Logging.h`
 - `docs/lathe-fixtures/*.ngc`

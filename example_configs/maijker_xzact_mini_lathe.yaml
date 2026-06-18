@@ -74,25 +74,6 @@ axes:
         step_pin: i2so.3
         direction_pin: i2so.4
 
-  # Tool changer axis. Direction is handled by M62/M63 P0.
-  # digital0_pin gpio.5 drives the aux A4988 direction input.
-  # i2so.7 drives the aux A4988 step input through the MKS buzzer output.
-  a:
-    steps_per_mm: 320
-    max_rate_mm_per_min: 1000.0
-    acceleration_mm_per_sec2: 50.0
-    max_travel_mm: 100000
-    soft_limits: false
-    motor0:
-      limit_all_pin: NO_PIN
-      limit_neg_pin: NO_PIN
-      limit_pos_pin: NO_PIN
-      hard_limits: false
-      pulloff_mm: 0.000
-      stepstick:
-        step_pin: i2so.7
-        direction_pin: NO_PIN
-
   # Existing commanded spindle axis from the old build.
   # This is not spindle phase feedback; the lathe encoder below must be a real spindle encoder.
   c:
@@ -152,6 +133,25 @@ probe:
   pin: gpio.22
   check_mode_start: true
 
+maijker_5_station_turret:
+  station_count: 5
+  step_pin: i2so.7
+  direction_pin: gpio.5
+  forward_direction: true
+  steps_per_station: 320
+  step_rate_hz: 400
+  pulse_us: 10
+  dir_setup_ms: 10
+  overshoot_steps: 32
+  lock_backoff_steps: 24
+  lock_settle_ms: 250
+  require_confirmed_tool: true
+  current_tool: 0
+  sensor_pin: NO_PIN
+  sensor_tool: 1
+  sensor_debounce_ms: 25
+  home_timeout_steps: 2000
+
 HBridge:
   pwm_hz: 5000
   output_cw_pin: gpio.25
@@ -164,7 +164,7 @@ HBridge:
   tool_num: 5
   speed_map: 0=0.000% 2000=100.000%
   off_on_alarm: true
-  m6_macro: $SD/Run=maijker_tool_change.gcode
+  atc: maijker_5_station_turret
 
 user_outputs:
   analog0_pin: NO_PIN
@@ -175,7 +175,7 @@ user_outputs:
   analog1_hz: 5000
   analog2_hz: 5000
   analog3_hz: 5000
-  digital0_pin: gpio.5
+  digital0_pin: NO_PIN
   digital1_pin: NO_PIN
   digital2_pin: NO_PIN
   digital3_pin: NO_PIN

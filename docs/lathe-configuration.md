@@ -103,6 +103,8 @@ The JSON response contains `cmd: "421"`, `status: "ok"`, and a `data` array of i
 - CSS clamp and minimum CSS diameter;
 - encoder enable state and pulses per revolution;
 - active lathe tool offsets and nose radius;
+- Maijker turret configured/current/target/confirmed/sensor/error state when
+  the `maijker_5_station_turret` ATC driver is configured;
 - spindle feedback measured RPM/index/angular/stale/fault state.
 
 The fallback embedded WebUI tool page includes a Lathe Status panel that calls `ESP421`. The main WebUI should use the same endpoint so it can display lathe state without parsing free-form text.
@@ -112,11 +114,13 @@ Additional firmware WebUI command endpoints are available for tool workflows:
 ```text
 /command?cmd=%5BESP422%5DT=7%20GX=1.0%20GZ=2.0%20WX=0.0%20WZ=0.0%20NR=0.4%20O=1
 /command?cmd=%5BESP423%5DT=7%20MX=10.0%20RX=24.0%20MODE=diameter%20MZ=-4.0%20RZ=0.0
+/command?cmd=%5BESP424%5DHOME=1
 ```
 
 - `ESP422` saves a lathe tool table entry. Parameters are `T` for tool number, `GX/GZ` for geometry, `WX/WZ` for wear, `NR` for nose radius, and `O` for insert orientation.
 - `ESP423` performs a touch-off calculation. X touch-off uses `MX/RX` and optional `MODE=diameter`; Z touch-off uses `MZ/RZ`. Supplying only X or only Z updates only that axis.
-- Both commands return JSON using the standard `cmd`, `status`, and `data` fields, then the UI should refresh `ESP421`.
+- `ESP424` runs a Maijker turret home/verify pass only when the ATC has a configured `sensor_pin`; open-loop machines should initialize the physical station deliberately with `M61Qn`.
+- These commands return JSON using the standard `cmd`, `status`, and `data` fields, then the UI should refresh `ESP421`.
 
 ## Encoder feedback and synchronized threading foundation
 

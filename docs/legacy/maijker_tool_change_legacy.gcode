@@ -1,4 +1,6 @@
-; FluidNC ATC tool change macro for the Maijker 5-tool turret.
+; Legacy FluidNC ATC tool change macro for the Maijker 5-tool turret.
+; Superseded by the maijker_5_station_turret ATC driver.
+; Kept only as a reference for the original M62/M63 + fake A-axis workaround.
 ; Assumptions:
 ; - Machine starts with tool 1 in position.
 ; - Tool changes are called with M6 T<target_tool>, where target_tool is 1..5.

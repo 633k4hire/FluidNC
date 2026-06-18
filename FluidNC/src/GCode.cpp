@@ -1868,8 +1868,13 @@ Error gc_execute_line(const char* input_line) {
                 gc_state.spindle_speed = 0.0;
             }
             log_info("Current T:" << gc_state.current_tool << " Selected T:" << gc_state.selected_tool);
-            spindle->tool_change(gc_state.selected_tool, false, false);
-            if (spindle->_atc_name == "" && spindle->_m6_macro.get().empty()) {  // if neither of these exist we need to set the value here
+            const bool tool_change_ok = spindle->tool_change(gc_state.selected_tool, false, false);
+            if (!tool_change_ok) {
+                report_ovr_counter = 0;
+                gc_ovr_changed();
+                return sys.abort() || state_is(State::Alarm) ? Error::Reset : Error::GcodeValueWordInvalid;
+            }
+            if (spindle->has_atc() || (spindle->_atc_name == "" && spindle->_m6_macro.get().empty())) {
                 gc_state.current_tool = gc_state.selected_tool;
                 gc_apply_lathe_tool_offsets(gc_state.current_tool);
             }
@@ -1892,7 +1897,12 @@ Error gc_execute_line(const char* input_line) {
         if (new_spindle) {
             gc_state.spindle_speed = 0.0;
         }
-        spindle->tool_change(gc_state.selected_tool, false, true);
+        const bool tool_change_ok = spindle->tool_change(gc_state.selected_tool, false, true);
+        if (!tool_change_ok) {
+            report_ovr_counter = 0;
+            gc_ovr_changed();
+            return sys.abort() || state_is(State::Alarm) ? Error::Reset : Error::GcodeValueWordInvalid;
+        }
         gc_state.current_tool = gc_block.values.q;
         gc_apply_lathe_tool_offsets(gc_state.current_tool);
         report_ovr_counter    = 0;  // Set to report change immediately
