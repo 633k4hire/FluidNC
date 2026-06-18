@@ -139,6 +139,8 @@ idf_component_register(SRCS BTConfig.cpp
 							Spindles/VFD/YL620Protocol.cpp
 							ToolChangers/atc.cpp
 							ToolChangers/atc_manual.cpp
+							ToolChangers/maijker_turret.cpp
+							ToolChangers/maijker_turret_logic.cpp
 							WebUI/Authentication.cpp
 							WebUI/Mdns.cpp
 							WebUI/NotificationsService.cpp

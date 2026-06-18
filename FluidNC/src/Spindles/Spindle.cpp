@@ -136,6 +136,10 @@ namespace Spindles {
             log_info(_name << " spindle changed to tool:" << tool_number << " using " << _atc_name);
             return _atc->tool_change(tool_number, pre_select, set_tool);
         }
+        if (!_atc_name.empty()) {
+            log_error(_name << " spindle ATC '" << _atc_name << "' not found");
+            return false;
+        }
         if (!_m6_macro.get().empty()) {
             if (pre_select) {
                 return true;

@@ -16,6 +16,7 @@
 #include "Lathe.h"
 #include "LatheEncoder.h"
 #include "Spindles/Spindle.h"
+#include "ToolChangers/maijker_turret.h"
 
 #include <Esp.h>
 
@@ -165,10 +166,19 @@ namespace WebUI {
             j.id_value_object("Encoder pulses/rev", int32_t(Lathe::encoder_pulses_per_revolution()));
 
             auto tool = Lathe::active_tool_offset();
-            j.id_value_object("Active lathe tool", tool.valid ? int32_t(tool.tool_number) : int32_t(0));
+            j.id_value_object("Active lathe tool", int32_t(tool.tool_number));
             j.id_value_object("Lathe tool X offset mm", float_string(tool.x_mm));
             j.id_value_object("Lathe tool Z offset mm", float_string(tool.z_mm));
             j.id_value_object("Tool nose radius mm", float_string(tool.nose_radius_mm));
+
+            auto turret = ATCs::maijker_turret_status();
+            j.id_value_object("Turret configured", turret.configured ? "true" : "false");
+            j.id_value_object("Turret current tool", int32_t(turret.current_tool));
+            j.id_value_object("Turret target tool", int32_t(turret.target_tool));
+            j.id_value_object("Turret tool confirmed", turret.tool_confirmed ? "true" : "false");
+            j.id_value_object("Turret sensor configured", turret.sensor_configured ? "true" : "false");
+            j.id_value_object("Turret sensor active", turret.sensor_active ? "true" : "false");
+            j.id_value_object("Turret last error", turret.last_error);
 
             const auto feedback = spindle->latheFeedback().status();
             j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
@@ -249,6 +259,19 @@ namespace WebUI {
 
             Error err = Lathe::touch_off_tool(spec);
             send_json_command_response(out, 423, err == Error::Ok, err == Error::Ok ? "lathe tool touched off" : errorString(err));
+            return err;
+        }
+
+        static Error homeMaijkerTurretJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP424
+            std::string home;
+            if (!get_param(parameter, "HOME=", home) || !(home == "1" || home == "true" || home == "TRUE")) {
+                send_json_command_response(out, 424, false, errorString(Error::InvalidValue));
+                return Error::InvalidValue;
+            }
+
+            Error err = ATCs::maijker_turret_home();
+            auto  status = ATCs::maijker_turret_status();
+            send_json_command_response(out, 424, err == Error::Ok, status.last_error);
             return err;
         }
 
@@ -391,6 +414,7 @@ namespace WebUI {
             new WebCommand(NULL, WEBCMD, WU, "ESP421", "System/Lathe", showLatheStatusJSON, anyState);
             new WebCommand("T=tool [GX=x] [GZ=z] [WX=x] [WZ=z] [NR=r] [O=orientation]", WEBCMD, WA, "ESP422", "Lathe/ToolSet", setLatheToolJSON, anyState);
             new WebCommand("T=tool [MX=x RX=x MODE=diameter|radius] [MZ=z RZ=z]", WEBCMD, WA, "ESP423", "Lathe/TouchOff", touchOffLatheToolJSON, anyState);
+            new WebCommand("HOME=1", WEBCMD, WA, "ESP424", "Lathe/TurretHome", homeMaijkerTurretJSON, anyState);
             new WebCommand("RESTART", WEBCMD, WA, "ESP444", "System/Control", setSystemMode);
 
             //      new WebCommand("ON|OFF", WEBCMD, WA, "ESP115", "Radio/State", setRadioState);
