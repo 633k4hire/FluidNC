@@ -194,5 +194,6 @@ The stable adapter/HMI contract is documented in
   unavailable on this machine and must not be inferred from software state.
 
 Build the Maijker machine firmware with `pio run -e maijker_wifi`; that
-environment uses the two-slot `maijker_4mb_ota.csv` layout required by the
-expanded telemetry firmware.
+environment omits the unused onboard-OLED implementation so the expanded
+telemetry firmware and bundled filesystem both fit the standard two-slot 4 MiB
+layout.

@@ -453,5 +453,7 @@ $env:PLATFORMIO_CORE_DIR = 'C:\Users\Matthew Metzger\.platformio'
 pio run -e maijker_wifi
 ```
 
-`maijker_wifi` uses `maijker_4mb_ota.csv`, with two equal application slots.
-Do not substitute the smaller default `wifi` partition layout for this machine.
+`maijker_wifi` omits the unused onboard-OLED implementation because the
+machine uses the external TAMS LVGL HMI. That keeps the firmware within the
+standard 4 MiB `min_littlefs.csv` layout with two equal OTA application slots
+and enough LittleFS space for the bundled WebUI/configuration files.
