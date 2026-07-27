@@ -9,6 +9,7 @@
 */
 
 #include "Planner.h"
+#include "Lathe.h"
 #include "Machine/MachineConfig.h"
 
 #include <cstdlib>  // PSoc Required for labs
@@ -309,7 +310,9 @@ bool plan_buffer_line(float* target, plan_line_data_t* pl_data) {
     block->lathe_css       = pl_data->lathe_css;
     block->lathe_threading = pl_data->lathe_threading;
     block->line_number     = pl_data->line_number;
-    block->is_jog        = pl_data->is_jog;
+    block->source_line     = pl_data->source_line;
+    block->shared_chuck_c_motion = pl_data->shared_chuck_c_motion;
+    block->is_jog          = pl_data->is_jog;
 
     // Compute and store initial move distance data.
     // Copy position data based on type of motion being planned.
@@ -430,6 +433,9 @@ bool plan_buffer_line(float* target, plan_line_data_t* pl_data) {
         next_buffer_head  = plan_next_block_index(block_buffer_head);
         // Finish up by recalculating the plan with the new block.
         planner_recalculate();
+    }
+    if (block->shared_chuck_c_motion) {
+        Lathe::note_shared_chuck_c_motion();
     }
     return true;
 }

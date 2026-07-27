@@ -174,11 +174,14 @@ namespace ATCs {
     MaijkerTurretStatus MaijkerTurret::status() const {
         MaijkerTurretStatus status;
         status.configured        = true;
+        status.station_count      = _station_count;
         status.current_tool      = _current_tool;
         status.target_tool       = _target_tool;
         status.tool_confirmed    = _tool_confirmed;
         status.sensor_configured = sensor_configured();
         status.sensor_active     = sensor_active();
+        status.mechanically_confirmed = status.sensor_configured && status.sensor_active && _current_tool == _sensor_tool;
+        status.position_basis    = status.sensor_configured ? "indexed_dead_reckoning" : "software_dead_reckoning";
         status.last_error        = _last_error.c_str();
         return status;
     }

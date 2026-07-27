@@ -20,6 +20,8 @@ namespace Machine {
         float    _maxCssRpm        = 0.0f;
         int32_t  _xAxis            = 0;
         int32_t  _zAxis            = 2;
+        bool     _sharedChuck      = false;
+        int32_t  _cAxis            = 5;
         uint32_t _feedbackStaleMs  = 250;
         bool     _encoderEnable    = false;
         Pin      _encoderPulsePin;
@@ -35,6 +37,8 @@ namespace Machine {
             handler.item("max_css_rpm", _maxCssRpm, 0.0f, 10000000.0f);
             handler.item("x_axis", _xAxis, 0, 5);
             handler.item("z_axis", _zAxis, 0, 5);
+            handler.item("shared_chuck", _sharedChuck);
+            handler.item("c_axis", _cAxis, 0, 5);
             handler.item("feedback_stale_ms", _feedbackStaleMs, 1, 60000);
             handler.item("encoder_enable", _encoderEnable);
             handler.item("encoder_pulse_pin", _encoderPulsePin);
@@ -54,6 +58,12 @@ namespace Machine {
             }
             if (_enable && _xAxis == _zAxis) {
                 throw std::runtime_error("Lathe x_axis and z_axis must be different");
+            }
+            if (_sharedChuck && !_enable) {
+                throw std::runtime_error("Lathe shared_chuck requires lathe/enable: true");
+            }
+            if (_sharedChuck && (_cAxis == _xAxis || _cAxis == _zAxis)) {
+                throw std::runtime_error("Lathe shared chuck c_axis must be different from x_axis and z_axis");
             }
             if (_encoderEnable && !_enable) {
                 throw std::runtime_error("Lathe encoder requires lathe/enable: true");

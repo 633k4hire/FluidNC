@@ -74,6 +74,7 @@ void gc_init() {
     gc_state.current_tool   = -1;
     coords[gc_state.modal.coord_select]->get(gc_state.coord_system);
     flowcontrol_init();
+    Lathe::reset_shared_chuck_state();
 }
 
 // Sets g-code parser position in mm. Input in steps. Called by the system abort and hard
@@ -296,6 +297,8 @@ Error gc_execute_line(const char* input_line) {
     bool laserIsMotion        = false;
     bool nonmodalG38          = false;  // Used for G38.6-9
     bool isWaitOnInputDigital = false;
+    bool sharedChuckCAxisMotion = false;
+    bool sharedChuckRequiresSync = false;
 
     auto    n_axis = Axes::_numberAxis;
     float   coord_data[MAX_N_AXIS];  // Used by WCO-related commands
@@ -1719,6 +1722,20 @@ Error gc_execute_line(const char* input_line) {
         }
     }
     // [21. Program flow ]: No error checks required.
+    if (Lathe::shared_chuck_enabled()) {
+        const bool go_home = gc_block.non_modal_command == NonModal::GoHome0 || gc_block.non_modal_command == NonModal::GoHome1;
+        sharedChuckCAxisMotion =
+            (axis_command == AxisCommand::MotionMode && bitnum_is_true(axis_words, Lathe::c_axis())) ||
+            (go_home && (!axis_words || bitnum_is_true(axis_words, Lathe::c_axis())));
+
+        const auto chuck_decision = Lathe::evaluate_shared_chuck_transition(
+            true, Lathe::shared_chuck_mode(), sharedChuckCAxisMotion, gc_block.modal.spindle);
+        if (chuck_decision.disposition == Lathe::SharedChuckDisposition::Reject) {
+            log_info(Lathe::shared_chuck_conflict_message(chuck_decision.conflict));
+            return Error::GcodeUnsupportedCommand;
+        }
+        sharedChuckRequiresSync = chuck_decision.disposition == Lathe::SharedChuckDisposition::AllowAfterSynchronize;
+    }
     // [0. Non-specific error-checks]: Complete unused value words check, i.e. IJK used when in arc
     // radius mode, or axis words that aren't used in the block.
     if (jogMotion) {
@@ -1748,6 +1765,20 @@ Error gc_execute_line(const char* input_line) {
     plan_line_data_t  plan_data;
     plan_line_data_t* pl_data = &plan_data;
     memset(pl_data, 0, sizeof(plan_line_data_t));  // Zero pl_data struct
+    pl_data->shared_chuck_c_motion = sharedChuckCAxisMotion;
+    if (Job::active()) {
+        pl_data->source_line = static_cast<uint32_t>(Job::source()->lineNumber());
+        const auto& jobs = Job::jobs_stack();
+        if (!jobs.empty()) {
+            Lathe::record_program_name(jobs.front()->channel()->name());
+        }
+    }
+    if (sharedChuckRequiresSync && !state_is(State::CheckMode)) {
+        protocol_buffer_synchronize();
+        if (sys.abort()) {
+            return Error::Reset;
+        }
+    }
     // Intercept jog commands and complete error checking for valid jog commands and execute.
     // NOTE: G-code parser state is not updated, except the position to ensure sequential jog
     // targets are computed correctly. The final parser position after a jog is updated in
@@ -1920,6 +1951,7 @@ Error gc_execute_line(const char* input_line) {
         gc_ovr_changed();
         gc_state.modal.spindle = gc_block.modal.spindle;
     }
+    Lathe::note_shared_chuck_spindle_state(gc_state.modal.spindle);
     pl_data->spindle = gc_state.modal.spindle;
     // [8. Coolant control ]:
     // At most one of M7, M8, M9 can appear in a GCode block, but the overall coolant

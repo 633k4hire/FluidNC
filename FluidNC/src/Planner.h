@@ -58,6 +58,8 @@ struct plan_block_t {
     SpindleState spindle;      // Spindle enable state
     CoolantState coolant;      // Coolant state
     int32_t      line_number;  // Block line number for real-time reporting. Copied from pl_line_data.
+    uint32_t     source_line;  // Physical source-file line captured when this block was planned.
+    bool         shared_chuck_c_motion;
 
     // Fields used by the motion planner to manage acceleration. Some of these values may be updated
     // by the stepper module during execution of special motion cases for replanning purposes.
@@ -92,6 +94,8 @@ struct plan_line_data_t {
     SpindleState spindle;         // Spindle enable state
     CoolantState coolant;         // Coolant state
     int32_t      line_number;     // Desired line number to report when executing.
+    uint32_t     source_line;     // Source-file line; zero for interactive/streamed commands.
+    bool         shared_chuck_c_motion;
     bool         is_jog;          // true if this was generated due to a jog command
     bool         limits_checked;  // true if soft limits already checked
 };

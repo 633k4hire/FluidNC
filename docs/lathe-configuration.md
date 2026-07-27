@@ -16,6 +16,8 @@ lathe:
   max_css_rpm: 2500
   x_axis: 0                 # X axis index; 0=X, 1=Y, 2=Z, ...
   z_axis: 2                 # Z axis index
+  shared_chuck: true        # C stepper and spindle output drive one chuck
+  c_axis: 5                 # C axis index
   feedback_stale_ms: 250
   encoder_enable: true
   encoder_pulse_pin: gpio.34
@@ -29,6 +31,9 @@ lathe:
 - CSS requires `max_css_rpm` greater than zero so `G96` cannot accelerate the spindle without a clamp.
 - CSS requires `min_css_diameter_mm` greater than zero to avoid infinite RPM near centerline.
 - `x_axis` and `z_axis` must be different.
+- `shared_chuck: true` requires lathe mode and a `c_axis` distinct from the
+  configured X and Z axes. Firmware then prevents simultaneous C-axis and
+  spindle ownership.
 - Threading should remain disabled until spindle feedback reports measured RPM, index pulse, angular position, non-stale state, and no fault.
 - `encoder_enable: true` requires `enable: true`, a valid `encoder_pulse_pin`, and `encoder_pulses_per_rev` greater than zero.
 - Threading with the built-in encoder path requires an `encoder_index_pin` so each synchronized pass can align to a known spindle revolution.
@@ -173,3 +178,21 @@ The parser also supports conservative single-line lathe helper-cycle dialects th
 ## Diameter/radius validation audit
 
 The cross-cutting diameter/radius audit is documented in `docs/lathe-diameter-radius-validation.md`. It records the policy that internal X remains radius millimeters, while `G7` user input is diameter and is converted before coordinate offsets, probing, jogging targets, cycles, CSS, and touch-off storage. Use `docs/lathe-fixtures/diameter-radius-coordinate-audit.ngc` for check-mode and air-cut validation before hardware cutting.
+
+## TAMS adapter telemetry and bounded controls
+
+The stable adapter/HMI contract is documented in
+`docs/tams-fluidnc-telemetry-v1.md`. In summary:
+
+- `$ESP425` emits the complete read-only digital-twin snapshot, including
+  planner-executing program-line provenance;
+- `$ESP426` selects mutually exclusive `IDLE`, `C_POSITIONING`, or `SPINDLE`
+  ownership for the shared physical chuck without starting an output;
+- `$ESP427` performs an exact, bounded X/Z probe request;
+- arbitrary remote writes are not part of the contract;
+- physical E-stop and turret mechanical-confirmation feedback are explicitly
+  unavailable on this machine and must not be inferred from software state.
+
+Build the Maijker machine firmware with `pio run -e maijker_wifi`; that
+environment uses the two-slot `maijker_4mb_ota.csv` layout required by the
+expanded telemetry firmware.

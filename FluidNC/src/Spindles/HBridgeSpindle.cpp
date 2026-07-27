@@ -3,6 +3,7 @@
 
 #include "HBridgeSpindle.h"
 #include "GCode.h"   // gc_state.modal
+#include "Lathe.h"
 #include "System.h"  // sys
 
 namespace Spindles {
@@ -66,6 +67,13 @@ namespace Spindles {
             log_config_error(name() << " spindle pins not defined");
         }
 
+        if ((state == SpindleState::Cw || state == SpindleState::Ccw) &&
+            Lathe::shared_chuck_mode() == Lathe::SharedChuckMode::CPositioning) {
+            log_error("Shared chuck spindle start blocked until C-axis positioning is complete");
+            state = SpindleState::Disable;
+            speed = 0;
+        }
+
         uint32_t dev_speed = mapSpeed(state, speed);
         _state             = state;
 
@@ -87,6 +95,7 @@ namespace Spindles {
 
         set_enable(state != SpindleState::Disable);
         spindleDelay(state, speed);
+        Lathe::note_shared_chuck_spindle_state(state);
     }
 
     // prints the startup message of the spindle config
@@ -108,8 +117,8 @@ namespace Spindles {
         _current_pwm_duty = duty;
 
         if (_state == SpindleState::Cw) {
-            _output_cw_pin.setDuty(0);
-            _output_ccw_pin.setDuty(duty);
+            _output_ccw_pin.setDuty(0);
+            _output_cw_pin.setDuty(duty);
         } else if (_state == SpindleState::Ccw) {
             _output_cw_pin.setDuty(0);
             _output_ccw_pin.setDuty(duty);

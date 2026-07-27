@@ -15,6 +15,13 @@
 #include "GCode.h"
 #include "Lathe.h"
 #include "LatheEncoder.h"
+#include "Alarm.h"
+#include "Job.h"
+#include "Limit.h"
+#include "MotionControl.h"
+#include "Planner.h"
+#include "Stepper.h"
+#include "Machine/Homing.h"
 #include "Spindles/Spindle.h"
 #include "ToolChangers/maijker_turret.h"
 
@@ -23,6 +30,10 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 #include "Module.h"
 
@@ -146,6 +157,530 @@ namespace WebUI {
             return "unknown";
         }
 
+        static void json_literal(JSONencoder& j, const char* key, const std::string& value) {
+            j.begin_member(key);
+            j.verbatim(value);
+        }
+
+        static void json_bool(JSONencoder& j, const char* key, bool value) {
+            json_literal(j, key, value ? "true" : "false");
+        }
+
+        static void json_number(JSONencoder& j, const char* key, uint64_t value) {
+            json_literal(j, key, std::to_string(value));
+        }
+
+        static void json_number(JSONencoder& j, const char* key, int64_t value) {
+            json_literal(j, key, std::to_string(value));
+        }
+
+        static void json_number(JSONencoder& j, const char* key, float value, int precision = 6) {
+            if (!std::isfinite(value)) {
+                json_literal(j, key, "null");
+                return;
+            }
+            json_literal(j, key, float_string(value, precision));
+        }
+
+        static void json_nullable_number(JSONencoder& j, const char* key, bool available, float value, int precision = 6) {
+            if (!available || !std::isfinite(value)) {
+                json_literal(j, key, "null");
+                return;
+            }
+            json_number(j, key, value, precision);
+        }
+
+        static const char* spindle_state_name(SpindleState state) {
+            switch (state) {
+                case SpindleState::Cw:
+                    return "CLOCKWISE";
+                case SpindleState::Ccw:
+                    return "COUNTERCLOCKWISE";
+                case SpindleState::Disable:
+                    return "STOPPED";
+                case SpindleState::Unknown:
+                    return "UNKNOWN";
+            }
+            return "UNKNOWN";
+        }
+
+        static const char* motion_mode_name(Motion motion) {
+            switch (motion) {
+                case Motion::Seek:
+                    return "G0_RAPID";
+                case Motion::Linear:
+                    return "G1_LINEAR";
+                case Motion::CwArc:
+                    return "G2_CLOCKWISE_ARC";
+                case Motion::CcwArc:
+                    return "G3_COUNTERCLOCKWISE_ARC";
+                case Motion::Threading:
+                    return "G33_THREADING";
+                case Motion::LatheFinishingCycle:
+                    return "G70_FINISHING";
+                case Motion::LatheRoughingCycle:
+                    return "G71_ROUGHING";
+                case Motion::LatheGroovingCycle:
+                    return "G75_GROOVING";
+                case Motion::LatheThreadingCycle:
+                    return "G76_THREADING";
+                case Motion::LathePeckCycle:
+                    return "G83_PECK";
+                case Motion::ProbeToward:
+                    return "G38_2_PROBE_TOWARD";
+                case Motion::ProbeTowardNoError:
+                    return "G38_3_PROBE_TOWARD_NO_ERROR";
+                case Motion::ProbeAway:
+                    return "G38_4_PROBE_AWAY";
+                case Motion::ProbeAwayNoError:
+                    return "G38_5_PROBE_AWAY_NO_ERROR";
+                case Motion::None:
+                    return "G80_NONE";
+            }
+            return "UNKNOWN";
+        }
+
+        static const char* telemetry_feed_mode_name(FeedRate mode) {
+            switch (mode) {
+                case FeedRate::InverseTime:
+                    return "INVERSE_TIME";
+                case FeedRate::UnitsPerRev:
+                    return "UNITS_PER_REVOLUTION";
+                case FeedRate::UnitsPerMin:
+                    return "UNITS_PER_MINUTE";
+            }
+            return "UNKNOWN";
+        }
+
+        static const char* execution_name(State state) {
+            switch (state) {
+                case State::Cycle:
+                case State::Jog:
+                case State::Homing:
+                    return "ACTIVE";
+                case State::Hold:
+                case State::Held:
+                case State::SafetyDoor:
+                    return "INTERRUPTED";
+                case State::Idle:
+                case State::CheckMode:
+                    return "READY";
+                case State::Alarm:
+                case State::Critical:
+                case State::ConfigAlarm:
+                case State::Sleep:
+                    return "STOPPED";
+                case State::Starting:
+                    return "UNAVAILABLE";
+            }
+            return "UNAVAILABLE";
+        }
+
+        static std::string coordinate_system_name(CoordIndex coordinate_system) {
+            if (coordinate_system >= CoordIndex::G54 && coordinate_system <= CoordIndex::G59) {
+                return "G" + std::to_string(54 + static_cast<int>(coordinate_system) - static_cast<int>(CoordIndex::G54));
+            }
+            if (coordinate_system >= CoordIndex::G59_1 && coordinate_system <= CoordIndex::G59_3) {
+                return "G59." + std::to_string(1 + static_cast<int>(coordinate_system) - static_cast<int>(CoordIndex::G59_1));
+            }
+            return "UNKNOWN";
+        }
+
+        static bool control_pin_state(const char* legend, bool& configured, bool& active) {
+            configured = false;
+            active     = false;
+            if (config == nullptr || config->_control == nullptr) {
+                return false;
+            }
+            for (auto pin : config->_control->_pins) {
+                if (strcmp(pin->legend(), legend) == 0) {
+                    configured = pin->defined();
+                    active     = configured && pin->get();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static void json_axis(
+            JSONencoder& j, const char* key, axis_t axis, const float* machine, const float* wco, MotorMask limits, AxisMask unhomed) {
+            j.begin_member_object(key);
+            json_bool(j, "available", axis < Axes::_numberAxis);
+            j.member("native_units", axis == C_AXIS ? "DEGREE" : "MILLIMETER");
+            json_number(j, "machine", machine[axis]);
+            json_number(j, "work", machine[axis] - wco[axis]);
+            json_number(j, "work_offset", wco[axis]);
+            json_bool(j, "homed", bitnum_is_false(unhomed, axis));
+            const bool limit_active = bitnum_is_true(limits, Machine::Axes::motor_bit(axis, 0)) ||
+                                      bitnum_is_true(limits, Machine::Axes::motor_bit(axis, 1));
+            json_bool(j, "limit_active", limit_active);
+            j.end_object();
+        }
+
+        static void json_condition(JSONencoder& j, const char* level, const char* source, const char* code, const char* text) {
+            j.begin_object();
+            j.member("level", level);
+            j.member("source", source);
+            j.member("code", code);
+            j.member("text", text);
+            j.end_object();
+        }
+
+        static uint64_t monotonic_uptime_ms() {
+            static uint32_t previous = 0;
+            static uint64_t epoch    = 0;
+            const uint32_t now       = millis();
+            if (now < previous) {
+                epoch += (uint64_t(1) << 32);
+            }
+            previous = now;
+            return epoch + now;
+        }
+
+        static Error showTamsTelemetryJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP425
+            static uint64_t sequence = 0;
+
+            float machine_position[MAX_N_AXIS] = {};
+            float work_offset[MAX_N_AXIS]      = {};
+            float last_probe_position[MAX_N_AXIS] = {};
+            copyAxes(machine_position, get_mpos());
+            copyAxes(work_offset, get_wco());
+            steps_to_mpos(last_probe_position, probe_steps);
+
+            int32_t  executing_gcode_line = gc_state.line_number;
+            uint32_t executing_source_line = 0;
+            bool     planner_line          = false;
+            if (const auto block = plan_get_current_block()) {
+                executing_gcode_line  = block->line_number;
+                executing_source_line = block->source_line;
+                planner_line          = true;
+            }
+
+            const bool program_active = Job::active() || (planner_line && executing_source_line > 0);
+            const auto feedback       = spindle->latheFeedback().status();
+            const auto spindle_state  = spindle->get_state();
+            const auto turret         = ATCs::maijker_turret_status();
+            const auto active_tool    = Lathe::active_tool_offset();
+            const auto active_tool_data =
+                active_tool.valid ? Lathe::get_tool_data(active_tool.tool_number) : std::optional<Lathe::ToolData> {};
+            const auto coolant        = config->_coolant->get_state();
+            const auto limit_state    = limits_get_state();
+            const auto unhomed_axes   = Machine::Homing::unhomed_axes();
+
+            bool estop_configured = false;
+            bool estop_active     = false;
+            control_pin_state("estop_pin", estop_configured, estop_active);
+
+            std::string payload;
+            JSONencoder j([&payload](const char* fragment) { payload += fragment; });
+            j.begin();
+            j.member("schema", "tams.fluidnc.telemetry.v1");
+            json_number(j, "sequence", ++sequence);
+            json_number(j, "uptime_ms", monotonic_uptime_ms());
+
+            j.begin_member_object("machine");
+            j.member("manufacturer", "TAMS");
+            j.member("model", "Maijker XZACT Mini Lathe");
+            j.member("configured_name", config->_name);
+            j.member("board", config->_board);
+            j.member("firmware", git_info);
+            j.member("state", state_name());
+            j.member("availability", sys.state() == State::Starting || sys.state() == State::ConfigAlarm ? "UNAVAILABLE" : "AVAILABLE");
+            json_number(j, "alarm_code", static_cast<uint64_t>(lastAlarm));
+            const char* alarm_name = alarmString(lastAlarm);
+            j.member("alarm", alarm_name == nullptr ? "UNKNOWN" : alarm_name);
+            j.end_object();
+
+            j.begin_member_object("execution");
+            j.member("state", execution_name(sys.state()));
+            const char* controller_mode = program_active ? "AUTOMATIC"
+                                          : (sys.state() == State::Jog || sys.state() == State::Homing) ? "MANUAL"
+                                                                                                       : "MANUAL_DATA_INPUT";
+            j.member("controller_mode", controller_mode);
+            j.member("motion_mode", motion_mode_name(gc_state.modal.motion));
+            j.member("feed_mode", telemetry_feed_mode_name(gc_state.modal.feed_rate));
+            j.member("units", gc_state.modal.units == Units::Inches ? "INCH" : "MILLIMETER");
+            j.member("distance_mode", gc_state.modal.distance == Distance::Absolute ? "ABSOLUTE" : "INCREMENTAL");
+            switch (gc_state.modal.plane_select) {
+                case Plane::XY:
+                    j.member("plane", "XY");
+                    break;
+                case Plane::ZX:
+                    j.member("plane", "ZX");
+                    break;
+                case Plane::YZ:
+                    j.member("plane", "YZ");
+                    break;
+            }
+            j.member("coordinate_system", coordinate_system_name(gc_state.modal.coord_select));
+            json_number(j, "programmed_feed", gc_state.feed_rate);
+            j.member(
+                "programmed_feed_units",
+                gc_state.modal.feed_rate == FeedRate::UnitsPerRev
+                    ? (gc_state.modal.units == Units::Inches ? "INCH_PER_REVOLUTION" : "MILLIMETER_PER_REVOLUTION")
+                    : (gc_state.modal.feed_rate == FeedRate::InverseTime
+                           ? "PER_MINUTE"
+                           : (gc_state.modal.units == Units::Inches ? "INCH_PER_MINUTE" : "MILLIMETER_PER_MINUTE")));
+            json_number(j, "realtime_feed_mm_per_min", Stepper::get_realtime_rate());
+            j.begin_member_object("program");
+            j.member("name", Lathe::program_name());
+            json_bool(j, "active", program_active);
+            j.member("source", executing_source_line > 0 || Job::active() ? "FILE" : "STREAM");
+            j.end_object();
+            j.begin_member_object("line");
+            if (executing_gcode_line > 0) {
+                json_number(j, "gcode_n", static_cast<int64_t>(executing_gcode_line));
+            } else {
+                json_literal(j, "gcode_n", "null");
+            }
+            if (executing_source_line > 0) {
+                json_number(j, "source", static_cast<uint64_t>(executing_source_line));
+            } else {
+                json_literal(j, "source", "null");
+            }
+            j.member("provenance", planner_line ? "PLANNER_EXECUTING" : "PARSER_LAST");
+            j.end_object();
+            j.end_object();
+
+            j.begin_member_object("positions");
+            json_axis(j, "x", X_AXIS, machine_position, work_offset, limit_state, unhomed_axes);
+            json_axis(j, "z", Z_AXIS, machine_position, work_offset, limit_state, unhomed_axes);
+            json_axis(j, "c", C_AXIS, machine_position, work_offset, limit_state, unhomed_axes);
+            j.end_object();
+
+            j.begin_member_object("spindle");
+            json_bool(j, "shared_chuck", Lathe::shared_chuck_enabled());
+            j.member("mode", Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()));
+            j.member("c_axis", "C");
+            j.member("state", spindle_state_name(spindle_state));
+            json_number(j, "programmed_s", gc_state.spindle_speed);
+            json_number(j, "commanded_rpm", gc_state.lathe_commanded_rpm);
+            json_nullable_number(j, "measured_rpm", feedback.has_measured_rpm, feedback.measured_rpm);
+            j.member(
+                "speed_mode",
+                gc_state.modal.lathe_spindle_speed_mode == Lathe::SpindleSpeedMode::ConstantSurfaceSpeed ? "CONSTANT_SURFACE_SPEED"
+                                                                                                         : "FIXED_RPM");
+            j.member("diameter_mode", gc_state.modal.lathe_diameter_mode == Lathe::DiameterMode::Diameter ? "DIAMETER" : "RADIUS");
+            j.begin_member_object("encoder");
+            json_bool(j, "configured", Lathe::encoder_enabled());
+            json_bool(j, "capture_active", Lathe::encoder_capture_active());
+            json_number(j, "pulses_per_revolution", static_cast<uint64_t>(Lathe::encoder_pulses_per_revolution()));
+            json_bool(j, "has_measured_rpm", feedback.has_measured_rpm);
+            json_bool(j, "has_index", feedback.has_index_pulse);
+            json_bool(j, "has_angular_position", feedback.has_angular_position);
+            json_nullable_number(j, "angular_position_revolution", feedback.has_angular_position, feedback.angular_position_rev);
+            json_number(j, "revolution_count", static_cast<uint64_t>(feedback.revolution_count));
+            json_bool(j, "stale", feedback.stale);
+            json_bool(j, "fault", feedback.fault);
+            j.end_object();
+            j.end_object();
+
+            j.begin_member_object("tool");
+            json_number(j, "selected", static_cast<uint64_t>(gc_state.selected_tool));
+            json_number(j, "current", static_cast<int64_t>(gc_state.current_tool));
+            json_bool(j, "offset_available", active_tool.valid);
+            json_nullable_number(
+                j, "geometry_x_mm", active_tool_data.has_value(), active_tool_data ? active_tool_data->geometry_x_mm : 0.0f);
+            json_nullable_number(
+                j, "geometry_z_mm", active_tool_data.has_value(), active_tool_data ? active_tool_data->geometry_z_mm : 0.0f);
+            json_nullable_number(j, "wear_x_mm", active_tool_data.has_value(), active_tool_data ? active_tool_data->wear_x_mm : 0.0f);
+            json_nullable_number(j, "wear_z_mm", active_tool_data.has_value(), active_tool_data ? active_tool_data->wear_z_mm : 0.0f);
+            json_number(j, "x_offset_mm", active_tool.x_mm);
+            json_number(j, "z_offset_mm", active_tool.z_mm);
+            json_number(j, "nose_radius_mm", active_tool.nose_radius_mm);
+            json_number(j, "orientation", static_cast<uint64_t>(active_tool.orientation));
+            j.end_object();
+
+            j.begin_member_object("turret");
+            json_bool(j, "configured", turret.configured);
+            json_number(j, "station_count", static_cast<uint64_t>(turret.station_count));
+            json_number(j, "current_station", static_cast<uint64_t>(turret.current_tool));
+            json_number(j, "target_station", static_cast<uint64_t>(turret.target_tool));
+            json_bool(j, "software_position_known", turret.tool_confirmed);
+            json_bool(j, "sensor_configured", turret.sensor_configured);
+            json_bool(j, "sensor_active", turret.sensor_active);
+            json_bool(j, "mechanically_confirmed", turret.mechanically_confirmed);
+            j.member("position_basis", turret.position_basis);
+            j.member("last_error", turret.last_error);
+            j.end_object();
+
+            j.begin_member_object("probe");
+            json_bool(j, "configured", config->_probe->probePin().defined());
+            json_bool(j, "active", config->_probe->probePin().defined() && config->_probe->probePin().get());
+            json_bool(j, "cycle_active", probing);
+            json_bool(j, "last_succeeded", probe_succeeded);
+            j.begin_member_object("last_machine_position");
+            json_number(j, "x", last_probe_position[X_AXIS]);
+            json_number(j, "z", last_probe_position[Z_AXIS]);
+            json_number(j, "c", last_probe_position[C_AXIS]);
+            j.end_object();
+            j.end_object();
+
+            j.begin_member_object("overrides");
+            json_number(j, "feed_percent", static_cast<uint64_t>(sys.f_override()));
+            json_number(j, "rapid_percent", static_cast<uint64_t>(sys.r_override()));
+            json_number(j, "spindle_percent", static_cast<uint64_t>(sys.spindle_speed_ovr()));
+            j.end_object();
+
+            j.begin_member_object("coolant");
+            json_bool(j, "flood_available", config->_coolant->hasFlood());
+            json_bool(j, "mist_available", config->_coolant->hasMist());
+            json_bool(j, "flood_active", coolant.Flood);
+            json_bool(j, "mist_active", coolant.Mist);
+            j.end_object();
+
+            j.begin_member_object("capabilities");
+            json_bool(j, "read_only_snapshot", true);
+            json_bool(j, "raw_remote_write", false);
+            json_bool(j, "emergency_stop_feedback", estop_configured);
+            json_bool(j, "emergency_stop_active", estop_configured && estop_active);
+            json_bool(j, "turret_index_feedback", turret.sensor_configured);
+            json_bool(j, "feed_hold", true);
+            json_bool(j, "jog_cancel", true);
+            json_bool(j, "spindle_stop", true);
+            json_bool(j, "reset_abort", true);
+            json_bool(j, "automatic_resume_after_reconnect", false);
+            j.end_object();
+
+            j.begin_array("conditions");
+            const bool alarm_state = sys.state() == State::Alarm || sys.state() == State::Critical || sys.state() == State::ConfigAlarm;
+            if (alarm_state) {
+                json_condition(j, "FAULT", "CONTROLLER", "SYSTEM_ALARM", alarm_name == nullptr ? "Unknown controller alarm" : alarm_name);
+            }
+            if (!estop_configured) {
+                json_condition(j, "UNAVAILABLE", "SAFETY", "ESTOP_FEEDBACK_UNAVAILABLE", "Physical E-stop removes power but has no controller feedback input");
+            }
+            if (!turret.sensor_configured) {
+                json_condition(
+                    j,
+                    "UNAVAILABLE",
+                    "TURRET",
+                    "TURRET_POSITION_FEEDBACK_UNAVAILABLE",
+                    "Turret station is software dead-reckoned and not mechanically confirmed");
+            }
+            if (Lathe::encoder_enabled() && feedback.stale && spindle_state != SpindleState::Disable) {
+                json_condition(j, "WARNING", "SPINDLE", "ENCODER_STALE", "Spindle encoder feedback is stale while the spindle is commanded");
+            }
+            if (feedback.fault) {
+                json_condition(j, "FAULT", "SPINDLE", "ENCODER_FAULT", "Spindle encoder reported a fault");
+            }
+            if (turret.last_error != nullptr && strcmp(turret.last_error, "ok") != 0) {
+                json_condition(j, "WARNING", "TURRET", "TURRET_STATUS", turret.last_error);
+            }
+            j.end_array();
+            j.end();
+
+            payload.erase(std::remove(payload.begin(), payload.end(), '\r'), payload.end());
+            payload.erase(std::remove(payload.begin(), payload.end(), '\n'), payload.end());
+            constexpr size_t MaxTelemetryBytes = 8192;
+            if (payload.size() > MaxTelemetryBytes) {
+                log_string(out, "{\"schema\":\"tams.fluidnc.telemetry.v1\",\"error\":\"snapshot_too_large\"}");
+                return Error::InvalidValue;
+            }
+            log_string(out, payload);
+            return Error::Ok;
+        }
+
+        static void send_shared_chuck_mode_response(Channel& out, bool ok, const char* mode, const char* message) {
+            std::ostringstream response;
+            response << "{\"cmd\":\"426\",\"status\":\"" << (ok ? "ok" : "error") << "\",\"mode\":\"" << mode
+                     << "\",\"message\":\"" << message << "\"}";
+            log_string(out, response.str());
+        }
+
+        static Error selectSharedChuckModeJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP426
+            const std::string request = parameter == nullptr ? "" : parameter;
+            Lathe::SharedChuckMode requested_mode = Lathe::SharedChuckMode::Unavailable;
+            if (request == "MODE=IDLE") {
+                requested_mode = Lathe::SharedChuckMode::Idle;
+            } else if (request == "MODE=C_POSITIONING") {
+                requested_mode = Lathe::SharedChuckMode::CPositioning;
+            } else if (request == "MODE=SPINDLE") {
+                requested_mode = Lathe::SharedChuckMode::Spindle;
+            } else {
+                send_shared_chuck_mode_response(out, false, "UNAVAILABLE", "MODE must be IDLE, C_POSITIONING, or SPINDLE");
+                return Error::InvalidValue;
+            }
+
+            if (!Lathe::shared_chuck_enabled()) {
+                send_shared_chuck_mode_response(out, false, "UNAVAILABLE", "shared chuck is not configured");
+                return Error::InvalidValue;
+            }
+            if (sys.state() != State::Idle || inMotionState() || plan_get_current_block() != nullptr) {
+                send_shared_chuck_mode_response(
+                    out, false, Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()), "controller and planner must be idle");
+                return Error::InvalidValue;
+            }
+            if (spindle->get_state() != SpindleState::Disable) {
+                send_shared_chuck_mode_response(
+                    out, false, Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()), "spindle output must be stopped");
+                return Error::InvalidValue;
+            }
+            if (!Lathe::select_shared_chuck_mode(requested_mode)) {
+                send_shared_chuck_mode_response(out, false, "UNAVAILABLE", "mode selection failed");
+                return Error::InvalidValue;
+            }
+
+            send_shared_chuck_mode_response(out, true, Lathe::shared_chuck_mode_name(requested_mode), "ownership selected; outputs remain stopped");
+            return Error::Ok;
+        }
+
+        static void send_probe_response(Channel& out, bool ok, char axis, bool contact, float position_mm, const char* message) {
+            std::ostringstream response;
+            response << "{\"cmd\":\"427\",\"status\":\"" << (ok ? "ok" : "error") << "\",\"axis\":\"" << axis
+                     << "\",\"contact\":" << (contact ? "true" : "false") << ",\"position_mm\":" << float_string(position_mm)
+                     << ",\"message\":\"" << message << "\"}";
+            log_string(out, response.str());
+        }
+
+        static Error runBoundedProbeJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP427
+            const auto request = Lathe::parse_bounded_probe_request(parameter == nullptr ? "" : parameter);
+            const char axis_name = request.axis == Z_AXIS ? 'Z' : 'X';
+            if (request.error != Lathe::BoundedProbeRequestError::None) {
+                send_probe_response(out, false, axis_name, false, 0.0f, Lathe::bounded_probe_request_error_message(request.error));
+                return Error::InvalidValue;
+            }
+            if (config->_probe == nullptr || !config->_probe->probePin().defined()) {
+                send_probe_response(out, false, axis_name, false, 0.0f, "probe input is not configured");
+                return Error::InvalidValue;
+            }
+            if (sys.state() != State::Idle || inMotionState() || plan_get_current_block() != nullptr) {
+                send_probe_response(out, false, axis_name, false, 0.0f, "controller and planner must be idle");
+                return Error::InvalidValue;
+            }
+            if (spindle->get_state() != SpindleState::Disable || Lathe::shared_chuck_mode() != Lathe::SharedChuckMode::Idle) {
+                send_probe_response(out, false, axis_name, false, 0.0f, "spindle must be stopped and shared chuck mode must be IDLE");
+                return Error::InvalidValue;
+            }
+
+            gc_sync_position();
+            float target[MAX_N_AXIS] = {};
+            copyAxes(target, gc_state.position);
+            target[request.axis] += request.distance_mm;
+
+            plan_line_data_t probe_plan = {};
+            probe_plan.feed_rate                = request.feed_mm_min;
+            probe_plan.spindle                  = SpindleState::Disable;
+            probe_plan.spindle_speed            = 0;
+            probe_plan.coolant                  = config->_coolant->get_state();
+            probe_plan.motion.noFeedOverride    = 1;
+            const AxisMask probe_axis            = bitnum_to_mask(request.axis);
+            mc_probe_cycle(target, &probe_plan, false, true, probe_axis, __FLT_MAX__);
+            gc_sync_position();
+
+            float final_position[MAX_N_AXIS] = {};
+            copyAxes(final_position, get_mpos());
+            const bool contact = probe_succeeded;
+            send_probe_response(
+                out,
+                contact,
+                axis_name,
+                contact,
+                final_position[request.axis],
+                contact ? "probe contact detected" : "probe travel completed without contact");
+            return contact ? Error::Ok : Error::GcodeInvalidTarget;
+        }
+
         static Error showLatheStatusJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP421
             JSONencoder j(&out);
             j.begin();
@@ -173,9 +708,12 @@ namespace WebUI {
 
             auto turret = ATCs::maijker_turret_status();
             j.id_value_object("Turret configured", turret.configured ? "true" : "false");
+            j.id_value_object("Turret station count", int32_t(turret.station_count));
             j.id_value_object("Turret current tool", int32_t(turret.current_tool));
             j.id_value_object("Turret target tool", int32_t(turret.target_tool));
-            j.id_value_object("Turret tool confirmed", turret.tool_confirmed ? "true" : "false");
+            j.id_value_object("Turret software position known", turret.tool_confirmed ? "true" : "false");
+            j.id_value_object("Turret mechanically confirmed", turret.mechanically_confirmed ? "true" : "false");
+            j.id_value_object("Turret position basis", turret.position_basis);
             j.id_value_object("Turret sensor configured", turret.sensor_configured ? "true" : "false");
             j.id_value_object("Turret sensor active", turret.sensor_active ? "true" : "false");
             j.id_value_object("Turret last error", turret.last_error);
@@ -412,6 +950,10 @@ namespace WebUI {
             // WA - need admin password to set
             new WebCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
             new WebCommand(NULL, WEBCMD, WU, "ESP421", "System/Lathe", showLatheStatusJSON, anyState);
+            new WebCommand(NULL, WEBCMD, WU, "ESP425", "System/TamsTelemetry", showTamsTelemetryJSON, anyState);
+            new WebCommand("MODE=IDLE|C_POSITIONING|SPINDLE", WEBCMD, WA, "ESP426", "Lathe/SharedChuckMode", selectSharedChuckModeJSON, anyState);
+            new WebCommand(
+                "PROBE,AXIS=X|Z,DISTANCE=signed_mm,FEED=mm_per_min", WEBCMD, WA, "ESP427", "Lathe/BoundedProbe", runBoundedProbeJSON, anyState);
             new WebCommand("T=tool [GX=x] [GZ=z] [WX=x] [WZ=z] [NR=r] [O=orientation]", WEBCMD, WA, "ESP422", "Lathe/ToolSet", setLatheToolJSON, anyState);
             new WebCommand("T=tool [MX=x RX=x MODE=diameter|radius] [MZ=z RZ=z]", WEBCMD, WA, "ESP423", "Lathe/TouchOff", touchOffLatheToolJSON, anyState);
             new WebCommand("HOME=1", WEBCMD, WA, "ESP424", "Lathe/TurretHome", homeMaijkerTurretJSON, anyState);

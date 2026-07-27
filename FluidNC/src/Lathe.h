@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace Lathe {
     enum class SpindleSpeedMode : uint8_t {
@@ -32,6 +33,48 @@ namespace Lathe {
         ConstantSurfaceSpeed,
         FeedPerRevolution,
         Threading,
+    };
+
+    // The Maijker lathe has one physical chuck driven in two mutually-exclusive
+    // ways: as the continuously rotating spindle and as the indexed C axis.
+    // These values describe that physical ownership, not a second motor.
+    enum class SharedChuckMode : uint8_t {
+        Unavailable = 0,
+        Idle,
+        CPositioning,
+        Spindle,
+    };
+
+    enum class SharedChuckDisposition : uint8_t {
+        Allow = 0,
+        AllowAfterSynchronize,
+        Reject,
+    };
+
+    enum class SharedChuckConflict : uint8_t {
+        None = 0,
+        SimultaneousSpindleAndCAxis,
+    };
+
+    struct SharedChuckDecision {
+        SharedChuckDisposition disposition = SharedChuckDisposition::Allow;
+        SharedChuckMode        next_mode   = SharedChuckMode::Unavailable;
+        SharedChuckConflict    conflict    = SharedChuckConflict::None;
+    };
+
+    enum class BoundedProbeRequestError : uint8_t {
+        None = 0,
+        Malformed,
+        InvalidAxis,
+        InvalidDistance,
+        InvalidFeed,
+    };
+
+    struct BoundedProbeRequest {
+        axis_t                   axis        = X_AXIS;
+        float                    distance_mm = 0.0f;
+        float                    feed_mm_min = 0.0f;
+        BoundedProbeRequestError error       = BoundedProbeRequestError::Malformed;
     };
 
     enum class InsertOrientation : uint8_t {
@@ -204,6 +247,22 @@ namespace Lathe {
     uint32_t encoder_pulses_per_revolution();
     axis_t x_axis();
     axis_t z_axis();
+    bool shared_chuck_enabled();
+    axis_t c_axis();
+    SharedChuckDecision evaluate_shared_chuck_transition(
+        bool enabled, SharedChuckMode current_mode, bool c_axis_motion, SpindleState requested_spindle);
+    SharedChuckMode shared_chuck_mode();
+    const char* shared_chuck_mode_name(SharedChuckMode mode);
+    const char* shared_chuck_conflict_message(SharedChuckConflict conflict);
+    BoundedProbeRequest parse_bounded_probe_request(const std::string& request);
+    const char* bounded_probe_request_error_message(BoundedProbeRequestError error);
+    void reset_shared_chuck_state();
+    bool select_shared_chuck_mode(SharedChuckMode mode);
+    void note_shared_chuck_c_motion();
+    void note_shared_chuck_cycle_complete();
+    void note_shared_chuck_spindle_state(SpindleState state);
+    void record_program_name(const std::string& name);
+    const std::string& program_name();
     float css_rpm_from_diameter_mm(float surface_speed, float diameter_mm, bool surface_speed_is_inches_per_minute);
     float css_rpm_from_diameter_mm(float surface_speed, float diameter_mm, float minimum_diameter_mm, bool surface_speed_is_inches_per_minute);
     float clamp_css_rpm(float rpm);

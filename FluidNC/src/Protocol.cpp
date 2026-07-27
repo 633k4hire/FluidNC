@@ -18,6 +18,7 @@
 #include "SettingsDefinitions.h"  // gcode_echo
 #include "Machine/LimitPin.h"
 #include "Job.h"
+#include "Lathe.h"
 #include "Driver/restart.h"
 #include "Driver/watchdog.h"
 
@@ -829,6 +830,7 @@ void protocol_do_cycle_stop() {
             [[fallthrough]];
         case State::ConfigAlarm:
         case State::Alarm:
+            Lathe::note_shared_chuck_cycle_complete();
             break;
         case State::CheckMode:
         case State::Idle:
@@ -856,6 +858,7 @@ void protocol_do_cycle_stop() {
 
                 set_state(State::Idle);
             }
+            Lathe::note_shared_chuck_cycle_complete();
             break;
         case State::Homing:
             Machine::Homing::cycleStop();

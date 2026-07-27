@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <array>
+#include <cstdlib>
+#include <cstring>
 
 namespace Lathe {
     namespace {
@@ -24,6 +26,8 @@ namespace Lathe {
         std::array<ToolSlot, MaxLatheTools> tool_table;
         ActiveToolOffset active_offset;
         bool tool_table_loaded = false;
+        volatile SharedChuckMode active_shared_chuck_mode = SharedChuckMode::Idle;
+        std::string last_program_name;
 
         void reset_tool_table() {
             tool_table = {};
@@ -103,6 +107,202 @@ namespace Lathe {
 
     axis_t z_axis() {
         return enabled() ? static_cast<axis_t>(config->_lathe->_zAxis) : Z_AXIS;
+    }
+
+    bool shared_chuck_enabled() {
+        return enabled() && config->_lathe->_sharedChuck;
+    }
+
+    axis_t c_axis() {
+        return shared_chuck_enabled() ? static_cast<axis_t>(config->_lathe->_cAxis) : C_AXIS;
+    }
+
+    SharedChuckDecision evaluate_shared_chuck_transition(
+        bool shared_enabled, SharedChuckMode current_mode, bool c_axis_motion, SpindleState requested_spindle) {
+        if (!shared_enabled) {
+            return { SharedChuckDisposition::Allow, SharedChuckMode::Unavailable, SharedChuckConflict::None };
+        }
+
+        const bool spindle_requested = requested_spindle != SpindleState::Disable;
+        if (c_axis_motion && spindle_requested) {
+            return {
+                SharedChuckDisposition::Reject,
+                current_mode,
+                SharedChuckConflict::SimultaneousSpindleAndCAxis,
+            };
+        }
+        if (c_axis_motion) {
+            return { SharedChuckDisposition::Allow, SharedChuckMode::CPositioning, SharedChuckConflict::None };
+        }
+        if (spindle_requested) {
+            const auto disposition = current_mode == SharedChuckMode::CPositioning
+                                         ? SharedChuckDisposition::AllowAfterSynchronize
+                                         : SharedChuckDisposition::Allow;
+            return { disposition, SharedChuckMode::Spindle, SharedChuckConflict::None };
+        }
+        if (current_mode == SharedChuckMode::Spindle) {
+            return { SharedChuckDisposition::Allow, SharedChuckMode::Idle, SharedChuckConflict::None };
+        }
+        return { SharedChuckDisposition::Allow, current_mode, SharedChuckConflict::None };
+    }
+
+    SharedChuckMode shared_chuck_mode() {
+        return shared_chuck_enabled() ? active_shared_chuck_mode : SharedChuckMode::Unavailable;
+    }
+
+    const char* shared_chuck_mode_name(SharedChuckMode mode) {
+        switch (mode) {
+            case SharedChuckMode::Idle:
+                return "IDLE";
+            case SharedChuckMode::CPositioning:
+                return "C_POSITIONING";
+            case SharedChuckMode::Spindle:
+                return "SPINDLE";
+            case SharedChuckMode::Unavailable:
+                return "UNAVAILABLE";
+        }
+        return "UNAVAILABLE";
+    }
+
+    const char* shared_chuck_conflict_message(SharedChuckConflict conflict) {
+        switch (conflict) {
+            case SharedChuckConflict::SimultaneousSpindleAndCAxis:
+                return "Shared chuck cannot run the spindle and C axis in the same block; stop the spindle with M5 before C positioning";
+            case SharedChuckConflict::None:
+                return "ok";
+        }
+        return "unknown shared chuck conflict";
+    }
+
+    BoundedProbeRequest parse_bounded_probe_request(const std::string& request) {
+        BoundedProbeRequest result;
+        constexpr const char* Prefix = "PROBE,AXIS=";
+        constexpr const char* DistanceKey = ",DISTANCE=";
+        constexpr const char* FeedKey = ",FEED=";
+        constexpr size_t MaxRequestLength = 96;
+
+        if (request.empty() || request.size() > MaxRequestLength || request.rfind(Prefix, 0) != 0) {
+            return result;
+        }
+
+        const size_t axis_begin = strlen(Prefix);
+        const size_t distance_key = request.find(DistanceKey, axis_begin);
+        if (distance_key == std::string::npos || distance_key != axis_begin + 1) {
+            result.error = BoundedProbeRequestError::InvalidAxis;
+            return result;
+        }
+        const char axis_name = request[axis_begin];
+        if (axis_name == 'X') {
+            result.axis = X_AXIS;
+        } else if (axis_name == 'Z') {
+            result.axis = Z_AXIS;
+        } else {
+            result.error = BoundedProbeRequestError::InvalidAxis;
+            return result;
+        }
+
+        const size_t distance_begin = distance_key + strlen(DistanceKey);
+        const size_t feed_key = request.find(FeedKey, distance_begin);
+        if (feed_key == std::string::npos || request.find(',', feed_key + 1) != std::string::npos) {
+            result.error = BoundedProbeRequestError::Malformed;
+            return result;
+        }
+
+        auto parse_finite = [](const std::string& value, float& parsed) {
+            if (value.empty()) {
+                return false;
+            }
+            char* end = nullptr;
+            parsed = strtof(value.c_str(), &end);
+            return end != value.c_str() && *end == '\0' && std::isfinite(parsed);
+        };
+
+        if (!parse_finite(request.substr(distance_begin, feed_key - distance_begin), result.distance_mm) ||
+            result.distance_mm == 0.0f || std::fabs(result.distance_mm) > 100.0f) {
+            result.error = BoundedProbeRequestError::InvalidDistance;
+            return result;
+        }
+
+        const size_t feed_begin = feed_key + strlen(FeedKey);
+        if (!parse_finite(request.substr(feed_begin), result.feed_mm_min) || result.feed_mm_min <= 0.0f || result.feed_mm_min > 1000.0f) {
+            result.error = BoundedProbeRequestError::InvalidFeed;
+            return result;
+        }
+
+        result.error = BoundedProbeRequestError::None;
+        return result;
+    }
+
+    const char* bounded_probe_request_error_message(BoundedProbeRequestError error) {
+        switch (error) {
+            case BoundedProbeRequestError::None:
+                return "ok";
+            case BoundedProbeRequestError::Malformed:
+                return "expected PROBE,AXIS=X|Z,DISTANCE=mm,FEED=mm/min with no extra fields";
+            case BoundedProbeRequestError::InvalidAxis:
+                return "AXIS must be X or Z";
+            case BoundedProbeRequestError::InvalidDistance:
+                return "DISTANCE must be finite, nonzero, and within +/-100 mm";
+            case BoundedProbeRequestError::InvalidFeed:
+                return "FEED must be finite, positive, and no greater than 1000 mm/min";
+        }
+        return "invalid probe request";
+    }
+
+    void reset_shared_chuck_state() {
+        active_shared_chuck_mode = SharedChuckMode::Idle;
+        last_program_name.clear();
+    }
+
+    bool select_shared_chuck_mode(SharedChuckMode mode) {
+        if (!shared_chuck_enabled() || mode == SharedChuckMode::Unavailable) {
+            return false;
+        }
+        active_shared_chuck_mode = mode;
+        return true;
+    }
+
+    void note_shared_chuck_c_motion() {
+        if (shared_chuck_enabled()) {
+            active_shared_chuck_mode = SharedChuckMode::CPositioning;
+        }
+    }
+
+    void note_shared_chuck_cycle_complete() {
+        if (active_shared_chuck_mode == SharedChuckMode::CPositioning) {
+            active_shared_chuck_mode = SharedChuckMode::Idle;
+        }
+    }
+
+    void note_shared_chuck_spindle_state(SpindleState state) {
+        if (!shared_chuck_enabled()) {
+            return;
+        }
+        if (state == SpindleState::Cw || state == SpindleState::Ccw) {
+            active_shared_chuck_mode = SharedChuckMode::Spindle;
+        } else if (active_shared_chuck_mode == SharedChuckMode::Spindle) {
+            active_shared_chuck_mode = SharedChuckMode::Idle;
+        }
+    }
+
+    void record_program_name(const std::string& name) {
+        if (name.empty()) {
+            return;
+        }
+        constexpr size_t MaxProgramNameLength = 127;
+        last_program_name.clear();
+        last_program_name.reserve(std::min(name.size(), MaxProgramNameLength));
+        for (char c : name) {
+            if (last_program_name.size() >= MaxProgramNameLength) {
+                break;
+            }
+            const auto byte = static_cast<unsigned char>(c);
+            last_program_name += byte < 0x20 || byte == 0x7f ? '?' : c;
+        }
+    }
+
+    const std::string& program_name() {
+        return last_program_name;
     }
 
     float css_rpm_from_diameter_mm(float surface_speed, float diameter_mm, bool surface_speed_is_inches_per_minute) {

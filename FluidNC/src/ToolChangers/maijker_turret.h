@@ -16,11 +16,14 @@
 namespace ATCs {
     struct MaijkerTurretStatus {
         bool        configured        = false;
+        uint32_t    station_count      = 0;
         uint32_t    current_tool      = 0;
         uint32_t    target_tool       = 0;
         bool        tool_confirmed    = false;
         bool        sensor_configured = false;
         bool        sensor_active     = false;
+        bool        mechanically_confirmed = false;
+        const char* position_basis    = "unavailable";
         const char* last_error        = "not configured";
     };
 

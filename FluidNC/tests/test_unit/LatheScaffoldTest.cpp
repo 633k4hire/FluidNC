@@ -103,6 +103,96 @@ TEST(LatheScaffold, ConfiguredEncoderFeedbackFallsBackToNullWhenInactive) {
     EXPECT_FALSE(status.has_angular_position);
 }
 
+TEST(LatheScaffold, SharedChuckPolicyRejectsSimultaneousSpindleAndCAxis) {
+    auto decision = Lathe::evaluate_shared_chuck_transition(
+        true, Lathe::SharedChuckMode::Idle, true, SpindleState::Cw);
+
+    EXPECT_EQ(decision.disposition, Lathe::SharedChuckDisposition::Reject);
+    EXPECT_EQ(decision.conflict, Lathe::SharedChuckConflict::SimultaneousSpindleAndCAxis);
+    EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::Idle);
+}
+
+TEST(LatheScaffold, SharedChuckPolicyAllowsM5AndCAxisAsOrderedTransition) {
+    auto decision = Lathe::evaluate_shared_chuck_transition(
+        true, Lathe::SharedChuckMode::Spindle, true, SpindleState::Disable);
+
+    EXPECT_EQ(decision.disposition, Lathe::SharedChuckDisposition::Allow);
+    EXPECT_EQ(decision.conflict, Lathe::SharedChuckConflict::None);
+    EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::CPositioning);
+}
+
+TEST(LatheScaffold, SharedChuckPolicyRequiresSynchronizationBeforeSpindleOwnership) {
+    auto decision = Lathe::evaluate_shared_chuck_transition(
+        true, Lathe::SharedChuckMode::CPositioning, false, SpindleState::Cw);
+
+    EXPECT_EQ(decision.disposition, Lathe::SharedChuckDisposition::AllowAfterSynchronize);
+    EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::Spindle);
+}
+
+TEST(LatheScaffold, SharedChuckPolicyLeavesPendingCPositioningStoppedByM5) {
+    auto decision = Lathe::evaluate_shared_chuck_transition(
+        true, Lathe::SharedChuckMode::CPositioning, false, SpindleState::Disable);
+
+    EXPECT_EQ(decision.disposition, Lathe::SharedChuckDisposition::Allow);
+    EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::CPositioning);
+}
+
+TEST(LatheScaffold, SharedChuckPolicyIsInertWhenFeatureIsDisabled) {
+    auto decision = Lathe::evaluate_shared_chuck_transition(
+        false, Lathe::SharedChuckMode::Spindle, true, SpindleState::Cw);
+
+    EXPECT_EQ(decision.disposition, Lathe::SharedChuckDisposition::Allow);
+    EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::Unavailable);
+}
+
+TEST(LatheScaffold, ProgramNameIsBoundedAndStripsControlCharacters) {
+    std::string unsafe(150, 'A');
+    unsafe[4] = '\n';
+    Lathe::record_program_name(unsafe);
+
+    EXPECT_EQ(Lathe::program_name().size(), 127u);
+    EXPECT_EQ(Lathe::program_name()[4], '?');
+}
+
+TEST(LatheScaffold, BoundedProbeRequestAcceptsExactXAndZContracts) {
+    auto x = Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=-12.5,FEED=75");
+    EXPECT_EQ(x.error, Lathe::BoundedProbeRequestError::None);
+    EXPECT_EQ(x.axis, X_AXIS);
+    EXPECT_FLOAT_EQ(x.distance_mm, -12.5f);
+    EXPECT_FLOAT_EQ(x.feed_mm_min, 75.0f);
+
+    auto z = Lathe::parse_bounded_probe_request("PROBE,AXIS=Z,DISTANCE=100,FEED=1000");
+    EXPECT_EQ(z.error, Lathe::BoundedProbeRequestError::None);
+    EXPECT_EQ(z.axis, Z_AXIS);
+}
+
+TEST(LatheScaffold, BoundedProbeRequestRejectsUnsupportedAxesAndExtraFields) {
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=C,DISTANCE=1,FEED=10").error,
+        Lathe::BoundedProbeRequestError::InvalidAxis);
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=1,FEED=10,EXTRA=1").error,
+        Lathe::BoundedProbeRequestError::Malformed);
+}
+
+TEST(LatheScaffold, BoundedProbeRequestRejectsNonFiniteOrUnsafeMotion) {
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=nan,FEED=10").error,
+        Lathe::BoundedProbeRequestError::InvalidDistance);
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=0,FEED=10").error,
+        Lathe::BoundedProbeRequestError::InvalidDistance);
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=100.1,FEED=10").error,
+        Lathe::BoundedProbeRequestError::InvalidDistance);
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=1,FEED=0").error,
+        Lathe::BoundedProbeRequestError::InvalidFeed);
+    EXPECT_EQ(
+        Lathe::parse_bounded_probe_request("PROBE,AXIS=X,DISTANCE=1,FEED=1000.1").error,
+        Lathe::BoundedProbeRequestError::InvalidFeed);
+}
+
 TEST(LatheScaffold, XOffsetConvertsDiameterModeToMachineRadiusOffset) {
     EXPECT_FLOAT_EQ(Lathe::x_offset_to_machine_mm(2.0f, Lathe::DiameterMode::Radius), 2.0f);
     EXPECT_FLOAT_EQ(Lathe::x_offset_to_machine_mm(2.0f, Lathe::DiameterMode::Diameter), 1.0f);
@@ -152,6 +242,8 @@ TEST(LatheScaffold, LatheToolDataStoresGeometryWearNoseAndOrientation) {
     auto stored = Lathe::get_tool_data(7);
     ASSERT_TRUE(stored.has_value());
     EXPECT_FLOAT_EQ(stored->geometry_x_mm, 1.0f);
+    EXPECT_FLOAT_EQ(stored->geometry_z_mm, 2.0f);
+    EXPECT_FLOAT_EQ(stored->wear_x_mm, 0.1f);
     EXPECT_FLOAT_EQ(stored->wear_z_mm, -0.2f);
     EXPECT_FLOAT_EQ(stored->nose_radius_mm, 0.4f);
     EXPECT_EQ(stored->orientation, Lathe::InsertOrientation::FrontTurning);
@@ -162,6 +254,13 @@ TEST(LatheScaffold, LatheToolDataStoresGeometryWearNoseAndOrientation) {
     EXPECT_FLOAT_EQ(active.x_mm, 1.1f);
     EXPECT_FLOAT_EQ(active.z_mm, 1.8f);
     EXPECT_FLOAT_EQ(active.nose_radius_mm, 0.4f);
+
+    auto telemetry_source = Lathe::get_tool_data(active.tool_number);
+    ASSERT_TRUE(telemetry_source.has_value());
+    EXPECT_FLOAT_EQ(telemetry_source->geometry_x_mm, 1.0f);
+    EXPECT_FLOAT_EQ(telemetry_source->geometry_z_mm, 2.0f);
+    EXPECT_FLOAT_EQ(telemetry_source->wear_x_mm, 0.1f);
+    EXPECT_FLOAT_EQ(telemetry_source->wear_z_mm, -0.2f);
 }
 
 TEST(LatheScaffold, LatheToolTableCanBeClearedWithoutPersisting) {
