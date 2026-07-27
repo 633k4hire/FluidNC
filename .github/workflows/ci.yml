@@ -36,6 +36,8 @@ jobs:
         with:
           path: ~/.platformio
           key: platformio-${{ runner.os }}
+      - name: Verify Maijker LittleFS configuration aliases
+        run: python tools/verify_maijker_littlefs_config.py
       - name: Build target ${{ matrix.pio_env }}${{ matrix.pio_env_variant }}
         run: pio run -e ${{ matrix.pio_env }}${{ matrix.pio_env_variant }}
       - if: matrix.os == 'ubuntu-latest'
