@@ -28,6 +28,7 @@ volatile ExecAlarm lastAlarm;  // The most recent alarm code
 
 volatile const char* unwind_cause = nullptr;
 
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
 namespace {
     portMUX_TYPE alarmTelemetryMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -54,6 +55,7 @@ namespace {
         portEXIT_CRITICAL(&alarmTelemetryMux);
     }
 }
+#endif
 
 const std::map<ExecAlarm, const char*> AlarmNames = {
     { ExecAlarm::None, "None" },
@@ -83,6 +85,7 @@ const char* alarmString(ExecAlarm alarmNumber) {
     return it == AlarmNames.end() ? NULL : it->second;
 }
 
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
 size_t copy_alarm_telemetry(AlarmTelemetryRecord* destination, size_t capacity) {
     if (destination == nullptr || capacity == 0) {
         return 0;
@@ -173,6 +176,7 @@ const char* alarm_native_severity(ExecAlarm alarm) {
             return "FAULT";
     }
 }
+#endif
 
 static volatile bool rtSafetyDoor;
 
@@ -565,7 +569,9 @@ static void protocol_do_start() {
 
 static void protocol_do_alarm(void* alarmVoid) {
     lastAlarm = (ExecAlarm)((int)(intptr_t)alarmVoid);
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
     record_alarm_telemetry(lastAlarm);
+#endif
     if (spindle->_off_on_alarm) {
         spindle->stop();
     }

@@ -366,9 +366,11 @@ namespace WebUI {
             const auto coolant        = config->_coolant->get_state();
             const auto limit_state    = limits_get_state();
             const auto unhomed_axes   = Machine::Homing::unhomed_axes();
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
             AlarmTelemetryRecord alarm_history[AlarmTelemetryCapacity] = {};
             const size_t alarm_history_count =
                 copy_alarm_telemetry(alarm_history, AlarmTelemetryCapacity);
+#endif
 
             bool estop_configured = false;
             bool estop_active     = false;
@@ -392,6 +394,7 @@ namespace WebUI {
             json_number(j, "alarm_code", static_cast<uint64_t>(lastAlarm));
             const char* alarm_name = alarmString(lastAlarm);
             j.member("alarm", alarm_name == nullptr ? "UNKNOWN" : alarm_name);
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
             const bool alarm_state =
                 sys.state() == State::Alarm ||
                 sys.state() == State::Critical ||
@@ -400,8 +403,10 @@ namespace WebUI {
             j.member("alarm_native_code", alarm_native_code(lastAlarm));
             j.member("alarm_source", alarm_source(lastAlarm));
             j.member("alarm_native_severity", alarm_native_severity(lastAlarm));
+#endif
             j.end_object();
 
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
             j.begin_array("alarm_history");
             for (size_t index = 0; index < alarm_history_count; ++index) {
                 const auto& alarm_record = alarm_history[index];
@@ -423,6 +428,7 @@ namespace WebUI {
                 j.end_object();
             }
             j.end_array();
+#endif
 
             j.begin_member_object("execution");
             j.member("state", execution_name(sys.state()));
@@ -524,6 +530,7 @@ namespace WebUI {
             json_number(j, "orientation", static_cast<uint64_t>(active_tool.orientation));
             j.end_object();
 
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
             j.begin_member_object("assets");
             j.begin_array("cutting_tools");
             for (uint32_t station = 1; station <= 5; ++station) {
@@ -553,6 +560,7 @@ namespace WebUI {
             }
             j.end_array();
             j.end_object();
+#endif
 
             j.begin_member_object("turret");
             json_bool(j, "configured", turret.configured);
@@ -606,6 +614,7 @@ namespace WebUI {
             j.end_object();
 
             j.begin_array("conditions");
+#ifdef TAMS_MAIJKER_ALARM_ASSETS
             if (alarm_state) {
                 json_condition(
                     j,
@@ -614,6 +623,20 @@ namespace WebUI {
                     alarm_native_code(lastAlarm),
                     alarm_name == nullptr ? "Unknown controller alarm" : alarm_name);
             }
+#else
+            const bool alarm_state =
+                sys.state() == State::Alarm ||
+                sys.state() == State::Critical ||
+                sys.state() == State::ConfigAlarm;
+            if (alarm_state) {
+                json_condition(
+                    j,
+                    "FAULT",
+                    "CONTROLLER",
+                    "SYSTEM_ALARM",
+                    alarm_name == nullptr ? "Unknown controller alarm" : alarm_name);
+            }
+#endif
             if (!estop_configured) {
                 json_condition(j, "UNAVAILABLE", "SAFETY", "ESTOP_FEEDBACK_UNAVAILABLE", "Physical E-stop removes power but has no controller feedback input");
             }
