@@ -8,6 +8,9 @@
 */
 
 #include "Protocol.h"
+#ifdef ENABLE_AUTHENTICATION
+#    include "WebUI/WebUIServer.h"
+#endif
 #include "Event.h"
 
 #include <algorithm>
@@ -380,7 +383,16 @@ void protocol_main_loop() {
 
             Channel* out_channel = Job::leader ? Job::leader : activeChannel;
 
-            Error status_code = execute_line(activeLine, *out_channel, AuthenticationLevel::LEVEL_GUEST);
+            Error status_code;
+#ifdef ENABLE_AUTHENTICATION
+            if (WebUI::firmwareMaintenanceActive() &&
+                !WebUI::firmwareCommandAllowedDuringMaintenance(activeLine)) {
+                status_code = Error::AnotherInterfaceBusy;
+            } else
+#endif
+            {
+                status_code = execute_line(activeLine, *out_channel, AuthenticationLevel::LEVEL_GUEST);
+            }
 
             // Tell the channel that the line has been processed.
             // If the line was aborted, the channel could be invalid

@@ -12,6 +12,9 @@
 #include <WiFi.h>
 #include <StreamString.h>
 #include <Update.h>
+#include <Preferences.h>
+#include <esp_ota_ops.h>
+#include <esp_random.h>
 #include <esp_wifi_types.h>
 #include <DNSServer.h>
 
@@ -20,13 +23,28 @@
 #include "WebClient.h"
 
 #include "Protocol.h"  // protocol_send_event
+#include "State.h"
+#include "Planner.h"
+#include "GCode.h"
+#include "Lathe.h"
+#include "Report.h"
+#include "ToolChangers/maijker_turret.h"
 #include "FluidPath.h"
 #include "JSONEncoder.h"
+#include "FileStream.h"
+#include "DialFirmwareClient.h"
+#include "TamsFirmwarePackage.h"
+#include "TamsFirmwareTrust.h"
 
 #include "HashFS.h"
 #include <list>
 #include <algorithm>
+#include <atomic>
+#include <deque>
+#include <cctype>
+#include <cmath>
 #include <memory>
+#include <vector>
 
 #include "Mime.h"  // getContentType
 
@@ -40,6 +58,403 @@ namespace WebUI {
 }
 
 namespace {
+    struct FirmwareValidationContext {
+        TamsFirmware::StreamValidator validator;
+        size_t                        expected = 0;
+    };
+
+    struct FirmwareDeploymentBody {
+        std::vector<uint8_t> bytes;
+        size_t               expected = 0;
+        bool                 overflow = false;
+    };
+
+    struct LastFirmwareValidation {
+        TamsFirmware::ValidationResult result;
+        std::string                    target;
+        uint32_t                       at         = 0;
+        bool                           compatible = false;
+    };
+
+    LastFirmwareValidation lastFirmwareValidation;
+    struct ControllerFirmwareDeployment {
+        bool                           active   = false;
+        bool                           terminal = false;
+        bool                           success  = false;
+        bool                           receiptPersisted = false;
+        uint8_t                        stage    = 0;
+        uint32_t                       acceptedOffset = 0;
+        uint32_t                       startedAt = 0;
+        uint32_t                       lastActivity = 0;
+        std::string                    deploymentId;
+        std::string                    targetPartition;
+        std::string                    error;
+        std::string                    result;
+        TamsFirmware::ValidationResult package;
+        mbedtls_sha256_context         imageHash;
+        bool                           hashInitialized = false;
+    } controllerDeployment;
+    std::string lastRecordedDialReceipt;
+    std::atomic_bool       firmwareMaintenanceLock { false };
+    constexpr size_t        FirmwareRelayChunkSize  = 4096;
+    constexpr size_t        FirmwareBodyLimit       = 8192;
+    constexpr size_t        FirmwareReceiptMaxBytes = 2048;
+    constexpr const char*   FirmwareReceiptPath     = "/firmware-receipts.jsonl";
+    constexpr const char*   FirmwareReceiptTempPath = "/firmware-receipts.tmp";
+    constexpr const char*   FirmwareReceiptBackupPath = "/firmware-receipts.bak";
+    std::deque<std::string> firmwareReceipts;
+    bool                    firmwareReceiptsLoaded = false;
+
+    std::string jsonEscape(const std::string& input) {
+        std::string out;
+        out.reserve(input.size() + 8);
+        for (unsigned char c : input) {
+            switch (c) {
+                case '\\': out += "\\\\"; break;
+                case '"': out += "\\\""; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (c >= 0x20) out += static_cast<char>(c);
+                    break;
+            }
+        }
+        return out;
+    }
+
+    std::string controllerDeviceId() {
+        const char label[] = "tams-fluidnc-controller-v1";
+        uint64_t   mac     = ESP.getEfuseMac();
+        uint8_t    digest[32];
+        mbedtls_sha256_context context;
+        mbedtls_sha256_init(&context);
+        mbedtls_sha256_starts_ret(&context, 0);
+        mbedtls_sha256_update_ret(&context, reinterpret_cast<const uint8_t*>(label), sizeof(label) - 1);
+        mbedtls_sha256_update_ret(&context, reinterpret_cast<const uint8_t*>(&mac), sizeof(mac));
+        mbedtls_sha256_finish_ret(&context, digest);
+        mbedtls_sha256_free(&context);
+        static const char hex[] = "0123456789abcdef";
+        std::string id = "fluidnc-";
+        for (size_t index = 0; index < 8; ++index) {
+            id += hex[digest[index] >> 4];
+            id += hex[digest[index] & 0xf];
+        }
+        return id;
+    }
+
+    std::string randomHex(size_t bytes) {
+        static const char digits[] = "0123456789abcdef";
+        std::string       value;
+        value.reserve(bytes * 2);
+        for (size_t index = 0; index < bytes; ++index) {
+            uint8_t octet = static_cast<uint8_t>(esp_random());
+            value += digits[octet >> 4];
+            value += digits[octet & 0x0f];
+        }
+        return value;
+    }
+
+    uint32_t controllerReleaseCounter() {
+        Preferences preferences;
+        preferences.begin("tamsfw", true);
+        uint32_t counter = preferences.getULong("release_ctr", 0);
+        preferences.end();
+        return counter;
+    }
+
+    void reconcileControllerReleaseCounter() {
+        Preferences preferences;
+        preferences.begin("tamsfw", false);
+        if (preferences.getBool("pending", false)) {
+            std::string expected = preferences.getString("pending_ver", "").c_str();
+            std::string pendingPartition = preferences.getString("pending_part", "").c_str();
+            const esp_partition_t* running = esp_ota_get_running_partition();
+            if (!expected.empty() && expected == git_info && running &&
+                !pendingPartition.empty() && pendingPartition == running->label) {
+                preferences.putULong("release_ctr", preferences.getULong("pending_rel", 0));
+                preferences.putString("last_result", "success");
+            } else {
+                preferences.putString("last_result", "rollback_or_recovery");
+            }
+            preferences.putBool("pending", false);
+        }
+        preferences.end();
+    }
+
+    std::string bodyString(const FirmwareDeploymentBody* body) {
+        if (!body || body->bytes.empty()) return {};
+        return std::string(reinterpret_cast<const char*>(body->bytes.data()), body->bytes.size());
+    }
+
+    std::string bodyJsonString(const std::string& json, const char* key) {
+        std::string marker = "\"" + std::string(key) + "\"";
+        size_t      at     = json.find(marker);
+        if (at == std::string::npos) return {};
+        at = json.find(':', at + marker.size());
+        if (at == std::string::npos) return {};
+        at = json.find('"', at + 1);
+        if (at == std::string::npos) return {};
+        size_t end = json.find('"', at + 1);
+        if (end == std::string::npos) return {};
+        return json.substr(at + 1, end - at - 1);
+    }
+
+    bool bodyJsonNumber(const std::string& json, const char* key, double& value) {
+        std::string marker = "\"" + std::string(key) + "\"";
+        size_t      at     = json.find(marker);
+        if (at == std::string::npos) return false;
+        at = json.find(':', at + marker.size());
+        if (at == std::string::npos) return false;
+        char* end = nullptr;
+        value = strtod(json.c_str() + at + 1, &end);
+        return end != json.c_str() + at + 1 && std::isfinite(value);
+    }
+
+    bool bodyJsonTrue(const std::string& json, const char* key) {
+        std::string marker = "\"" + std::string(key) + "\"";
+        size_t      at     = json.find(marker);
+        if (at == std::string::npos) return false;
+        at = json.find(':', at + marker.size());
+        if (at == std::string::npos) return false;
+        ++at;
+        while (at < json.size() && isspace(static_cast<unsigned char>(json[at]))) ++at;
+        return json.compare(at, 4, "true") == 0;
+    }
+
+    std::string deploymentIdFromUrl(const std::string& url) {
+        constexpr const char prefix[] = "/api/v1/firmware/deployments/";
+        if (url.rfind(prefix, 0) != 0) return {};
+        size_t begin = sizeof(prefix) - 1;
+        size_t end   = url.find('/', begin);
+        return url.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    }
+
+    void loadFirmwareReceipts() {
+        if (firmwareReceiptsLoaded) return;
+        firmwareReceiptsLoaded = true;
+        try {
+            FluidPath path(FirmwareReceiptPath, LocalFS);
+            if (!stdfs::exists(path)) {
+                path = FluidPath(FirmwareReceiptBackupPath, LocalFS);
+                if (!stdfs::exists(path)) return;
+            }
+            FileStream input(path, "r");
+            std::string current;
+            bool        overflow = false;
+            while (input.available()) {
+                int value = input.read();
+                if (value < 0) break;
+                if (value == '\n') {
+                    if (!overflow && !current.empty()) firmwareReceipts.push_back(current);
+                    current.clear();
+                    overflow = false;
+                } else if (value != '\r') {
+                    if (current.size() < FirmwareReceiptMaxBytes) current += static_cast<char>(value);
+                    else overflow = true;
+                }
+            }
+            if (!overflow && !current.empty()) firmwareReceipts.push_back(current);
+            while (firmwareReceipts.size() > 16) firmwareReceipts.pop_front();
+        } catch (...) {
+            firmwareReceipts.clear();
+        }
+    }
+
+    bool persistFirmwareReceipts() {
+        try {
+            FluidPath temp(FirmwareReceiptTempPath, LocalFS);
+            {
+                FileStream output(temp, "w");
+                for (const auto& line : firmwareReceipts) {
+                    output.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
+                    output.write(static_cast<uint8_t>('\n'));
+                }
+            }
+            FluidPath destination(FirmwareReceiptPath, LocalFS);
+            FluidPath backup(FirmwareReceiptBackupPath, LocalFS);
+            std::error_code error;
+            if (stdfs::exists(backup)) stdfs::remove(backup, error);
+            error.clear();
+            bool hadDestination = stdfs::exists(destination);
+            if (hadDestination) {
+                stdfs::rename(destination, backup, error);
+                if (error) return false;
+            }
+            error.clear();
+            stdfs::rename(temp, destination, error);
+            if (error) {
+                if (hadDestination) {
+                    std::error_code restoreError;
+                    stdfs::rename(backup, destination, restoreError);
+                }
+                return false;
+            }
+            if (hadDestination) {
+                error.clear();
+                stdfs::remove(backup, error);
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool appendFirmwareReceipt(const WebUI::DialDeploymentState& deployment) {
+        loadFirmwareReceipts();
+        std::string receipt = "{\"deployment_id\":\"" + jsonEscape(deployment.deploymentId) +
+                              "\",\"controller_id\":\"" + controllerDeviceId() + "\",\"controller_version\":\"" +
+                              jsonEscape(git_info) + "\",\"target\":\"m5dial\",\"target_id\":\"" +
+                              jsonEscape(WebUI::DialFirmwareClient::instance().state().deviceId) +
+                              "\",\"target_fingerprint\":\"" +
+                              jsonEscape(WebUI::DialFirmwareClient::instance().state().fingerprint) +
+                              "\",\"target_ip\":\"" +
+                              jsonEscape(WebUI::DialFirmwareClient::instance().state().ip) +
+                              "\",\"package_id\":\"" + jsonEscape(deployment.packageId) +
+                              "\",\"signing_key_id\":\"" + jsonEscape(deployment.signingKeyId) +
+                              "\",\"from_version\":\"" + jsonEscape(deployment.fromVersion) +
+                              "\",\"to_version\":\"" + jsonEscape(deployment.toVersion) +
+                              "\",\"from_release_counter\":" + std::to_string(deployment.fromReleaseCounter) +
+                              ",\"to_release_counter\":" + std::to_string(deployment.toReleaseCounter) +
+                              ",\"manifest_sha256\":\"" + jsonEscape(deployment.manifestDigest) +
+                              "\",\"image_sha256\":\"" + jsonEscape(deployment.imageSha256) +
+                              "\",\"bytes\":" + std::to_string(deployment.acceptedOffset) +
+                              ",\"validation_stages\":[\"controller_signature\",\"controller_hash\",\"target_identity\","
+                              "\"target_signature\",\"target_hash\",\"reboot\",\"reconnect\",\"health\"]"
+                              ",\"result\":\"" + jsonEscape(deployment.result) +
+                              "\",\"health\":\"" +
+                              jsonEscape(WebUI::DialFirmwareClient::instance().state().health) +
+                              "\",\"fluidnc_link_state\":\"" +
+                              jsonEscape(WebUI::DialFirmwareClient::instance().state().fluidNcLinkState) +
+                              "\",\"rollback_recovery\":\"" +
+                               (deployment.success ? "not_required" : "available_on_previous_ota_slot") +
+                               "\",\"started_uptime_ms\":" + std::to_string(deployment.startedAt) +
+                               ",\"recorded_uptime_ms\":" + std::to_string(millis()) +
+                               ",\"receipt_persisted\":true}";
+        if (receipt.size() > FirmwareReceiptMaxBytes) return false;
+        std::string removed;
+        bool removedOldest = firmwareReceipts.size() >= 16;
+        if (removedOldest) {
+            removed = firmwareReceipts.front();
+            firmwareReceipts.pop_front();
+        }
+        firmwareReceipts.push_back(receipt);
+        if (persistFirmwareReceipts()) return true;
+        if (!firmwareReceipts.empty()) firmwareReceipts.pop_back();
+        if (removedOldest) firmwareReceipts.push_front(removed);
+        return false;
+    }
+
+    bool appendControllerFirmwareReceipt() {
+        loadFirmwareReceipts();
+        const auto& package = controllerDeployment.package;
+        std::string receipt =
+            "{\"deployment_id\":\"" + jsonEscape(controllerDeployment.deploymentId) +
+            "\",\"controller_id\":\"" + controllerDeviceId() + "\",\"target\":\"fluidnc_controller\","
+            "\"package_id\":\"" + jsonEscape(package.manifest.packageId) + "\",\"signing_key_id\":\"" +
+            jsonEscape(package.manifest.signingKeyId) + "\",\"from_version\":\"" + jsonEscape(git_info) +
+            "\",\"to_version\":\"" + jsonEscape(package.manifest.version) + "\",\"to_release_counter\":" +
+            std::to_string(package.manifest.releaseCounter) + ",\"manifest_sha256\":\"" +
+            jsonEscape(package.manifestSha256) + "\",\"image_sha256\":\"" +
+            jsonEscape(package.manifest.imageSha256) + "\",\"bytes\":" +
+            std::to_string(controllerDeployment.acceptedOffset) +
+            ",\"validation_stages\":[\"controller_signature\",\"controller_hash\",\"esp_image\"],\"result\":\"" +
+            jsonEscape(controllerDeployment.result) +
+            "\",\"rollback_recovery\":\"previous_ota_slot\",\"started_uptime_ms\":" +
+            std::to_string(controllerDeployment.startedAt) + ",\"recorded_uptime_ms\":" +
+            std::to_string(millis()) + ",\"receipt_persisted\":true}";
+        if (receipt.size() > FirmwareReceiptMaxBytes) return false;
+        std::string removed;
+        bool removedOldest = firmwareReceipts.size() >= 16;
+        if (removedOldest) {
+            removed = firmwareReceipts.front();
+            firmwareReceipts.pop_front();
+        }
+        firmwareReceipts.push_back(receipt);
+        if (persistFirmwareReceipts()) return true;
+        if (!firmwareReceipts.empty()) firmwareReceipts.pop_back();
+        if (removedOldest) firmwareReceipts.push_front(removed);
+        return false;
+    }
+
+    std::string controllerDeploymentJson() {
+        return "{\"deployment_id\":\"" + jsonEscape(controllerDeployment.deploymentId) +
+               "\",\"active\":" + (controllerDeployment.active ? "true" : "false") +
+               ",\"terminal\":" + (controllerDeployment.terminal ? "true" : "false") +
+               ",\"success\":" + (controllerDeployment.success ? "true" : "false") +
+               ",\"stage_index\":" + std::to_string(controllerDeployment.stage) +
+               ",\"accepted_offset\":" + std::to_string(controllerDeployment.acceptedOffset) +
+               ",\"expected_bytes\":" + std::to_string(controllerDeployment.package.manifest.imageLength) +
+               ",\"error\":\"" + jsonEscape(controllerDeployment.error) + "\",\"result\":\"" +
+               jsonEscape(controllerDeployment.result) + "\",\"receipt_persisted\":" +
+               (controllerDeployment.receiptPersisted ? "true" : "false") + "}";
+    }
+
+    bool firmwareSafety(std::string& reason) {
+        if (firmwareMaintenanceLock) {
+            reason = "another firmware deployment owns the maintenance lock";
+            return false;
+        }
+        if (!state_is(State::Idle)) {
+            reason = "machine state is not Idle";
+            return false;
+        }
+        if (plan_get_current_block() != nullptr) {
+            reason = "planner is not empty";
+            return false;
+        }
+        if (gc_state.modal.spindle != SpindleState::Disable) {
+            reason = "spindle is not off";
+            return false;
+        }
+        if (Lathe::shared_chuck_enabled() && Lathe::shared_chuck_mode() != Lathe::SharedChuckMode::Idle) {
+            reason = "shared chuck is not idle";
+            return false;
+        }
+        auto turret = ATCs::maijker_turret_status();
+        if (turret.configured && turret.target_tool != 0) {
+            reason = "turret action is pending";
+            return false;
+        }
+        reason = "Idle, planner empty, spindle off, shared chuck idle, turret idle";
+        return true;
+    }
+
+    bool firmwareReadOnlyCommand(String command) {
+        command.trim();
+        command.toUpperCase();
+        return command == "?" || command == "$G" || command == "ESP421" || command == "[ESP421]" ||
+               command == "ESP424" || command == "[ESP424]" || command == "ESP426" ||
+               command == "[ESP426]" || command == "ESP425" || command == "[ESP425]";
+    }
+
+    bool latheControlSafety(std::string& reason, Lathe::SharedChuckMode allowedChuckMode) {
+        if (!state_is(State::Idle)) {
+            reason = "machine state is not Idle";
+            return false;
+        }
+        if (plan_get_current_block() != nullptr) {
+            reason = "planner is not empty";
+            return false;
+        }
+        if (gc_state.modal.spindle != SpindleState::Disable) {
+            reason = "spindle must be off before accepting a new action";
+            return false;
+        }
+        if (Lathe::shared_chuck_enabled() && allowedChuckMode != Lathe::SharedChuckMode::Unavailable &&
+            Lathe::shared_chuck_mode() != allowedChuckMode) {
+            reason = "shared chuck ownership does not match the requested action";
+            return false;
+        }
+        auto turret = ATCs::maijker_turret_status();
+        if (turret.configured && turret.target_tool != 0) {
+            reason = "turret action is pending";
+            return false;
+        }
+        reason = "current server state permits the requested action";
+        return true;
+    }
+
     struct FileListChunkState {
         enum class Phase : uint8_t { Begin, FileEntries, Footer, End, Done };
 
@@ -221,12 +636,56 @@ namespace {
 
 using namespace asyncsrv;
 
-#include <esp_ota_ops.h>
-
 //embedded response file if no files on LocalFS
 #include "NoFile.h"
 
 namespace WebUI {
+    bool firmwareMaintenanceActive() {
+        return firmwareMaintenanceLock.load();
+    }
+
+    bool firmwareCommandAllowedDuringMaintenance(const char* command) {
+        return firmwareReadOnlyCommand(String(command ? command : ""));
+    }
+
+    class FirmwareDeploymentHandler : public AsyncWebHandler {
+    public:
+        bool canHandle(AsyncWebServerRequest* request) const override final {
+            return request->url().startsWith("/api/v1/firmware/deployments");
+        }
+
+        void handleRequest(AsyncWebServerRequest* request) override final {
+            WebUI_Server::handleFirmwareDeploymentRequest(request);
+        }
+
+        void handleBody(
+            AsyncWebServerRequest* request, unsigned char* data, size_t len, size_t index, size_t total) override final {
+            WebUI_Server::FirmwareDeploymentBody(request, data, len, index, total);
+        }
+
+        void handleUpload(
+            AsyncWebServerRequest*, const String&, size_t, uint8_t*, size_t, bool) override final {}
+    };
+
+    class LatheApiHandler : public AsyncWebHandler {
+    public:
+        bool canHandle(AsyncWebServerRequest* request) const override final {
+            return request->url().startsWith("/api/v1/lathe/");
+        }
+
+        void handleRequest(AsyncWebServerRequest* request) override final {
+            WebUI_Server::handleLatheApiRequest(request);
+        }
+
+        void handleBody(
+            AsyncWebServerRequest* request, unsigned char* data, size_t len, size_t index, size_t total) override final {
+            WebUI_Server::LatheApiBody(request, data, len, index, total);
+        }
+
+        void handleUpload(
+            AsyncWebServerRequest*, const String&, size_t, uint8_t*, size_t, bool) override final {}
+    };
+
     // Error codes for upload
     const int ESP_ERROR_AUTHENTICATION   = 1;
     const int ESP_ERROR_FILE_CREATION    = 2;
@@ -265,6 +724,9 @@ namespace WebUI {
     }
 
     void WebUI_Server::init() {
+#ifdef ENABLE_AUTHENTICATION
+        make_authentication_settings();
+#endif
         http_port   = new IntSetting("HTTP Port", WEBSET, WA, "ESP121", "HTTP/Port", DEFAULT_HTTP_PORT, MIN_HTTP_PORT, MAX_HTTP_PORT);
         http_enable = new EnumSetting("HTTP Enable", WEBSET, WA, "ESP120", "HTTP/Enable", DEFAULT_HTTP_STATE, &onoffOptions);
         http_block_during_motion = new EnumSetting("Block serving HTTP content during motion",
@@ -286,13 +748,19 @@ namespace WebUI {
         //create instance
         _webserver    = new AsyncWebServer(_port);
         _headerFilter = new AsyncHeaderFreeMiddleware();
+        reconcileControllerReleaseCounter();
+        DialFirmwareClient::instance().init(controllerDeviceId());
 
         //here the list of headers to be recorded
         _headerFilter->keep("Accept");
         _headerFilter->keep("Accept-Encoding");
         _headerFilter->keep("Cookie");
+        _headerFilter->keep("Content-Length");
+        _headerFilter->keep("Content-Type");
         _headerFilter->keep("If-None-Match");
         _headerFilter->keep("User-Agent");
+        _headerFilter->keep("X-CSRF-Token");
+        _headerFilter->keep("X-TAMS-Target");
 
         // WebDAV needs these
         _headerFilter->keep("Depth");
@@ -365,6 +833,21 @@ namespace WebUI {
 
         //web update
         _webserver->on("/updatefw", HTTP_ANY, handleUpdate, WebUpdateUpload);
+
+        // Signed firmware deployment APIs. Raw /updatefw remains available for
+        // attended controller recovery; the Maijker production UI never calls it.
+        _webserver->on("/api/v1/firmware/devices", HTTP_GET, handleFirmwareDevices);
+        _webserver->on("/api/v1/firmware/packages/validate",
+                       HTTP_POST,
+                       handleFirmwarePackageValidation,
+                       nullptr,
+                       FirmwarePackageBody);
+        _webserver->on("/api/v1/firmware/receipts", HTTP_GET, handleFirmwareReceipts);
+        _webserver->on("/api/v1/firmware/pair/start", HTTP_POST, handleFirmwarePairStart);
+        _webserver->on("/api/v1/firmware/pair/confirm", HTTP_POST, handleFirmwarePairConfirm);
+        _webserver->on("/api/v1/firmware/pair/status", HTTP_GET, handleFirmwarePairStatus);
+        _webserver->addHandler(new FirmwareDeploymentHandler());
+        _webserver->addHandler(new LatheApiHandler());
 
         //Direct SD management
         _webserver->on("/upload", HTTP_ANY, handle_direct_SDFileList, SDFileUpload);
@@ -620,7 +1103,8 @@ namespace WebUI {
     void WebUI_Server::handle_root(AsyncWebServerRequest* request) {
         log_info("WebUI: Request from " << request->client()->remoteIP());
         if (!(request->hasParam("forcefallback") && request->getParam("forcefallback")->value() == "yes")) {
-            if (myStreamFile(request, "index.html", false, true)) {
+            const char* index = Lathe::enabled() ? "index.html" : "index-legacy.html";
+            if (myStreamFile(request, index, false, true)) {
                 return;
             }
         }
@@ -633,7 +1117,7 @@ namespace WebUI {
 
     // Handle filenames and other things that are not explicitly registered
     void WebUI_Server::handle_not_found(AsyncWebServerRequest* request) {
-        if (is_authenticated() == AuthenticationLevel::LEVEL_GUEST) {
+        if (is_authenticated(request) == AuthenticationLevel::LEVEL_GUEST) {
             request->redirect("/");
             //_webserver->client().stop();
             return;
@@ -730,13 +1214,17 @@ namespace WebUI {
         return false;
     }
     void WebUI_Server::_handle_web_command(AsyncWebServerRequest* request, bool silent) {
-        AuthenticationLevel auth_level = is_authenticated();
+        AuthenticationLevel auth_level = is_authenticated(request);
         if (request->hasParam("cmd") || request->hasParam("commandText")) {
             String cmd;
             if (request->hasParam("cmd"))
                 cmd = request->getParam("cmd")->value();
             else
                 cmd = request->getParam("commandText")->value();
+            if (firmwareMaintenanceLock && !firmwareReadOnlyCommand(cmd)) {
+                request->send(423, "text/plain", "Firmware maintenance lock rejects machine-control commands\n");
+                return;
+            }
             // [ESPXXX] commands expect data in the HTTP response
             String cmdUpper = cmd;
             cmdUpper.toUpperCase();
@@ -751,7 +1239,12 @@ namespace WebUI {
             return;
         }
         if (request->hasParam("plain")) {
-            synchronousCommand(request, request->getParam("plain")->value().c_str(), silent, auth_level);
+            String command = request->getParam("plain")->value();
+            if (firmwareMaintenanceLock && !firmwareReadOnlyCommand(command)) {
+                request->send(423, "text/plain", "Firmware maintenance lock rejects machine-control commands\n");
+                return;
+            }
+            synchronousCommand(request, command.c_str(), silent, auth_level);
             return;
         }
         request->send(500, "text/plain", "Invalid command");
@@ -760,152 +1253,103 @@ namespace WebUI {
     //login status check
     void WebUI_Server::handle_login(AsyncWebServerRequest* request) {
 #ifdef ENABLE_AUTHENTICATION
-        const char* smsg;
-        std::string sUser, sPassword;
-        const char* auths;
-        uint16_t    code            = 200;
-        bool        msg_alert_error = false;
-        //disconnect can be done anytime no need to check credential
-        if (_webserver->hasArg("DISCONNECT")) {
-            std::string cookie(_webserver->header("Cookie").c_str());
-            size_t      pos = cookie.find("ESPSESSIONID=");
-            std::string sessionID;
-            if (pos != std::string::npos) {
-                size_t pos2 = cookie.find(";", pos);
-                sessionID   = cookie.substr(pos + strlen("ESPSESSIONID="), pos2);
-            }
-            ClearAuthIP(_webserver->client().remoteIP(), sessionID);
-            _webserver->sendHeader("Set-Cookie", "ESPSESSIONID=0");
-            _webserver->sendHeader(T_Cache_Control, T_no_cache);
-            sendAuth("Ok", "guest", "");
-            //_webserver->client().stop();
+        auto formValue = [request](const char* name) -> String {
+            if (request->hasParam(name, true)) return request->getParam(name, true)->value();
+            if (request->hasParam(name)) return request->getParam(name)->value();
+            return {};
+        };
+        auto hasFormValue = [request](const char* name) {
+            return request->hasParam(name, true) || request->hasParam(name);
+        };
+        auto sendLogin = [request](uint16_t code,
+                                   const char* status,
+                                   const char* level,
+                                   const char* user,
+                                   const char* cookie = nullptr) {
+            std::string json = "{\"status\":\"" + jsonEscape(status ? status : "") +
+                               "\",\"authentication_lvl\":\"" + jsonEscape(level ? level : "guest") +
+                               "\",\"user\":\"" + jsonEscape(user ? user : "") + "\"}";
+            AsyncWebServerResponse* response = request->beginResponse(code, T_application_json, json.c_str());
+            response->addHeader(T_Cache_Control, T_no_cache);
+            if (cookie) response->addHeader("Set-Cookie", cookie);
+            request->send(response);
+        };
+
+        if (hasFormValue("DISCONNECT")) {
+            AuthenticationIP* auth = getAuthForRequest(request);
+            if (auth) ClearAuthIP(auth->ip, auth->sessionID);
+            sendLogin(200, "Ok", "guest", "", "ESPSESSIONID=0; Max-Age=0; HttpOnly; SameSite=Strict; Path=/");
             return;
         }
 
-        AuthenticationLevel auth_level = is_authenticated();
-        if (auth_level == AuthenticationLevel::LEVEL_GUEST) {
-            auths = "guest";
-        } else if (auth_level == AuthenticationLevel::LEVEL_USER) {
-            auths = "user";
-        } else if (auth_level == AuthenticationLevel::LEVEL_ADMIN) {
-            auths = "admin";
-        } else {
-            auths = "???";
+        if (!hasFormValue("SUBMIT")) {
+            AuthenticationIP* auth = getAuthForRequest(request);
+            if (!auth || static_cast<uint32_t>(millis() - auth->last_time) > 360000U) {
+                if (auth) ClearAuthIP(auth->ip, auth->sessionID);
+                sendLogin(200, "Ok", "guest", "");
+                return;
+            }
+            auth->last_time = millis();
+            const char* level = auth->level == AuthenticationLevel::LEVEL_ADMIN ? "admin"
+                                : auth->level == AuthenticationLevel::LEVEL_USER ? "user"
+                                                                                : "guest";
+            sendLogin(200, "Ok", level, auth->userID);
+            return;
         }
 
-        //check is it is a submission or a query
-        if (_webserver->hasArg("SUBMIT")) {
-            //is there a correct list of query?
-            if (_webserver->hasArg("PASSWORD") && _webserver->hasArg("USER")) {
-                //USER
-                sUser = _webserver->arg("USER").c_str();
-                if (!((sUser == DEFAULT_ADMIN_LOGIN) || (sUser == DEFAULT_USER_LOGIN))) {
-                    msg_alert_error = true;
-                    smsg            = "Error : Incorrect User";
-                    code            = 401;
-                }
-
-                if (msg_alert_error == false) {
-                    //Password
-                    sPassword = _webserver->arg("PASSWORD").c_str();
-                    std::string sadminPassword(admin_password->get());
-                    std::string suserPassword(user_password->get());
-
-                    if (!(sUser == DEFAULT_ADMIN_LOGIN && sPassword == sadminPassword) ||
-                        (sUser == DEFAULT_USER_LOGIN && sPassword == suserPassword)) {
-                        msg_alert_error = true;
-                        smsg            = "Error: Incorrect password";
-                        code            = 401;
-                    }
-                }
-            } else {
-                msg_alert_error = true;
-                smsg            = "Error: Missing data";
-                code            = 500;
-            }
-            //change password
-            if (_webserver->hasArg("PASSWORD") && _webserver->hasArg("USER") && _webserver->hasArg("NEWPASSWORD") &&
-                (msg_alert_error == false)) {
-                std::string newpassword(_webserver->arg("NEWPASSWORD").c_str());
-
-                char pwdbuf[MAX_LOCAL_PASSWORD_LENGTH + 1];
-                newpassword.toCharArray(pwdbuf, MAX_LOCAL_PASSWORD_LENGTH + 1);
-
-                Error err;
-
-                if (sUser == DEFAULT_ADMIN_LOGIN) {
-                    err = admin_password->setStringValue(pwdbuf);
-                } else {
-                    err = user_password->setStringValue(pwdbuf);
-                }
-                if (err != Error::Ok) {
-                    msg_alert_error = true;
-                    smsg            = "Error: Password cannot contain spaces";
-                    code            = 500;
-                }
-            }
-            if ((code == 200) || (code == 500)) {
-                AuthenticationLevel current_auth_level;
-                if (sUser == DEFAULT_ADMIN_LOGIN) {
-                    current_auth_level = AuthenticationLevel::LEVEL_ADMIN;
-                } else if (sUser == DEFAULT_USER_LOGIN) {
-                    current_auth_level = AuthenticationLevel::LEVEL_USER;
-                } else {
-                    current_auth_level = AuthenticationLevel::LEVEL_GUEST;
-                }
-                //create Session
-                if ((current_auth_level != auth_level) || (auth_level == AuthenticationLevel::LEVEL_GUEST)) {
-                    AuthenticationIP* current_auth = new AuthenticationIP;
-                    current_auth->level            = current_auth_level;
-                    current_auth->ip               = _webserver->client().remoteIP();
-                    strcpy(current_auth->sessionID, create_session_ID());
-                    strcpy(current_auth->userID, sUser.c_str());
-                    current_auth->last_time = millis();
-                    if (AddAuthIP(current_auth)) {
-                        std::string tmps = "ESPSESSIONID=";
-                        tmps += current_auth->sessionID.c_str();
-                        _webserver->sendHeader("Set-Cookie", tmps);
-                        _webserver->sendHeader(T_Cache_Control, T_no_cache);
-                        switch (current_auth->level) {
-                            case AuthenticationLevel::LEVEL_ADMIN:
-                                auths = "admin";
-                                break;
-                            case AuthenticationLevel::LEVEL_USER:
-                                auths = "user";
-                                break;
-                            default:
-                                auths = "guest";
-                                break;
-                        }
-                    } else {
-                        delete current_auth;
-                        msg_alert_error = true;
-                        code            = 500;
-                        smsg            = "Error: Too many connections";
-                    }
-                }
-            }
-            if (code == 200) {
-                smsg = "Ok";
-            }
-
-            sendAuth("Ok", "guest", "");
-        } else {
-            if (auth_level != AuthenticationLevel::LEVEL_GUEST) {
-                std::string cookie(_webserver->header("Cookie").c_str());
-                size_t      pos = cookie.find("ESPSESSIONID=");
-                std::string sessionID;
-                if (pos != std::string::npos) {
-                    size_t pos2                         = cookie.find(";", pos);
-                    sessionID                           = cookie.substr(pos + strlen("ESPSESSIONID="), pos2);
-                    AuthenticationIP* current_auth_info = GetAuth(_webserver->client().remoteIP(), sessionID.c_str());
-                    if (current_auth_info != NULL) {
-                        sUser = current_auth_info->userID;
-                    }
-                }
-            }
-            sendAuth(smsg, auths, "");
+        if (!hasFormValue("USER") || !hasFormValue("PASSWORD")) {
+            sendLogin(400, "Error: Missing data", "guest", "");
+            return;
         }
+        std::string user     = formValue("USER").c_str();
+        std::string password = formValue("PASSWORD").c_str();
+        AuthenticationLevel level = AuthenticationLevel::LEVEL_GUEST;
+        bool valid = false;
+        if (user == DEFAULT_ADMIN_LOGIN) {
+            valid = authentication_password_matches(true, password.c_str());
+            level = AuthenticationLevel::LEVEL_ADMIN;
+        } else if (user == DEFAULT_USER_LOGIN) {
+            valid = authentication_password_matches(false, password.c_str());
+            level = AuthenticationLevel::LEVEL_USER;
+        }
+        if (!valid) {
+            sendLogin(401, "Error: Incorrect user or password", "guest", "");
+            return;
+        }
+
+        if (hasFormValue("NEWPASSWORD")) {
+            String newPassword = formValue("NEWPASSWORD");
+            char   passwordBuffer[MAX_LOCAL_PASSWORD_LENGTH + 1] = {};
+            newPassword.toCharArray(passwordBuffer, sizeof(passwordBuffer));
+            if (!authentication_set_password(level == AuthenticationLevel::LEVEL_ADMIN, passwordBuffer)) {
+                sendLogin(422, "Error: Password cannot contain spaces", "guest", "");
+                return;
+            }
+        }
+
+        AuthenticationIP* oldAuth = getAuthForRequest(request);
+        if (oldAuth) ClearAuthIP(oldAuth->ip, oldAuth->sessionID);
+        auto* auth = new AuthenticationIP;
+        auth->level = level;
+        auth->ip = request->client()->remoteIP();
+        strcpy(auth->sessionID, create_session_ID());
+        strcpy(auth->csrfToken, create_csrf_token());
+        strncpy(auth->userID, user.c_str(), sizeof(auth->userID) - 1);
+        auth->userID[sizeof(auth->userID) - 1] = '\0';
+        auth->last_time = millis();
+        auth->authenticated_at = auth->last_time;
+        if (!AddAuthIP(auth)) {
+            delete auth;
+            sendLogin(503, "Error: Too many authenticated sessions", "guest", "");
+            return;
+        }
+        std::string cookie = "ESPSESSIONID=" + std::string(auth->sessionID) +
+                             "; HttpOnly; SameSite=Strict; Path=/";
+        sendLogin(200,
+                  "Ok",
+                  level == AuthenticationLevel::LEVEL_ADMIN ? "admin" : "user",
+                  auth->userID,
+                  cookie.c_str());
 #else
         sendAuth(request, "Ok", "admin", "");
 #endif
@@ -941,6 +1385,10 @@ namespace WebUI {
     }
     // This page issues a feedhold to pause the motion then retries the WebUI reload
     void WebUI_Server::handleFeedholdReload(AsyncWebServerRequest* request) {
+        if (firmwareMaintenanceLock) {
+            request->send(423, "text/plain", "Firmware maintenance lock rejects feed hold\n");
+            return;
+        }
         protocol_send_event(&feedHoldEvent);
         //        delay(100);
         //        delay(100);
@@ -949,6 +1397,10 @@ namespace WebUI {
     }
     // This page issues a feedhold to pause the motion then retries the WebUI reload
     void WebUI_Server::handleCyclestartReload(AsyncWebServerRequest* request) {
+        if (firmwareMaintenanceLock) {
+            request->send(423, "text/plain", "Firmware maintenance lock rejects cycle start\n");
+            return;
+        }
         protocol_send_event(&cycleStartEvent);
         //        delay(100);
         //        delay(100);
@@ -957,6 +1409,10 @@ namespace WebUI {
     }
     // This page issues a feedhold to pause the motion then retries the WebUI reload
     void WebUI_Server::handleRestartReload(AsyncWebServerRequest* request) {
+        if (firmwareMaintenanceLock) {
+            request->send(423, "text/plain", "Firmware maintenance lock rejects reset\n");
+            return;
+        }
         protocol_send_event(&rtResetEvent);
         //        delay(100);
         //        delay(100);
@@ -1061,10 +1517,15 @@ namespace WebUI {
 
     //Web Update handler
     void WebUI_Server::handleUpdate(AsyncWebServerRequest* request) {
-        AuthenticationLevel auth_level = is_authenticated();
-        if (auth_level != AuthenticationLevel::LEVEL_ADMIN) {
+#ifdef ENABLE_AUTHENTICATION
+        bool authorized = firmwareMutationAuthorized(request, true);
+#else
+        AuthenticationLevel auth_level = is_authenticated(request);
+        bool authorized = auth_level == AuthenticationLevel::LEVEL_ADMIN;
+#endif
+        if (!authorized) {
             _upload_status = UploadStatus::NONE;
-            request->send(403, "text/plain", "Not allowed, log in first!\n");
+            request->send(403, "text/plain", "Recent administrator authentication and CSRF token required\n");
             return;
         }
 
@@ -1076,6 +1537,7 @@ namespace WebUI {
         } else {
             sendStatus(request, 200, std::to_string(int(_upload_status)).c_str());
             _upload_status = UploadStatus::NONE;
+            firmwareMaintenanceLock = false;
         }
     }
 
@@ -1085,8 +1547,14 @@ namespace WebUI {
         static uint32_t maxSketchSpace = UINT32_MAX;
 
         //only admin can update FW
-        if (is_authenticated() != AuthenticationLevel::LEVEL_ADMIN) {
+#ifdef ENABLE_AUTHENTICATION
+        bool authorized = firmwareMutationAuthorized(request, true);
+#else
+        bool authorized = is_authenticated(request) == AuthenticationLevel::LEVEL_ADMIN;
+#endif
+        if (!authorized) {
             _upload_status = UploadStatus::FAILED;
+            firmwareMaintenanceLock = false;
             log_info("Upload rejected");
             sendAuthFailed(request);
             //pushError(request, ESP_ERROR_AUTHENTICATION, "Upload rejected", 401);
@@ -1096,6 +1564,14 @@ namespace WebUI {
             if (!index) {  //upload.status == UPLOAD_FILE_START) {
                 log_info("Update Firmware");
                 _upload_status = UploadStatus::ONGOING;
+                std::string safetyReason;
+                if (!firmwareSafety(safetyReason)) {
+                    _upload_status = UploadStatus::FAILED;
+                    log_info("Update rejected: " << safetyReason);
+                    pushError(request, ESP_ERROR_UPLOAD, safetyReason.c_str());
+                } else {
+                    firmwareMaintenanceLock = true;
+                }
                 std::string sizeargname(filename.c_str());
                 sizeargname += "S";
                 if (request->hasParam(sizeargname.c_str()))
@@ -1155,6 +1631,7 @@ namespace WebUI {
                     _upload_status = UploadStatus::SUCCESSFUL;
                 } else {
                     _upload_status = UploadStatus::FAILED;
+                    firmwareMaintenanceLock = false;
                     log_info("Update failed");
                     pushError(request, ESP_ERROR_UPLOAD, "Update upload failed");
                 }
@@ -1162,9 +1639,705 @@ namespace WebUI {
         }
     }
 
+    void WebUI_Server::handleFirmwareDevices(AsyncWebServerRequest* request) {
+#ifdef ENABLE_AUTHENTICATION
+        if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
+            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+            return;
+        }
+        AuthenticationIP* auth = getAuthForRequest(request);
+        if (!auth) {
+            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+            return;
+        }
+        auto& dial = DialFirmwareClient::instance();
+        if (dial.discover() && dial.state().paired) dial.refreshHealth();
+        std::string safetyReason;
+        bool        safe     = firmwareSafety(safetyReason);
+        const auto* inactive = esp_ota_get_next_update_partition(nullptr);
+        std::string json     = "{\"controller\":{\"online\":true,\"device_id\":\"" + controllerDeviceId() +
+                           "\",\"version\":\"" + jsonEscape(git_info) +
+                           "\",\"hardware_role\":\"fluidnc_controller\",\"board\":\"maijker_dlc32\",";
+        json += "\"inactive_partition\":\"";
+        json += inactive ? inactive->label : "unavailable";
+        json += "\",\"inactive_partition_size\":";
+        json += std::to_string(inactive ? inactive->size : 0);
+        json += ",\"release_counter\":";
+        json += std::to_string(controllerReleaseCounter());
+        json += "},\"m5dial\":";
+        json += dial.stateJson();
+        json += ",";
+        json += "\"trust_configured\":";
+        json += TamsFirmware::trustConfigured() ? "true" : "false";
+        json += ",\"admin_password_hardened\":";
+        json += authentication_admin_password_is_default() ? "false" : "true";
+        json += ",\"safe\":";
+        json += safe ? "true" : "false";
+        json += ",\"safety_reason\":\"" + jsonEscape(safetyReason) + "\",\"csrf_token\":\"";
+        json += auth->csrfToken;
+        json += "\",\"maintenance_lock\":";
+        json += firmwareMaintenanceLock ? "true}" : "false}";
+        sendJSON(request, 200, json);
+#else
+        request->send(503, "application/json", "{\"error\":\"Maijker authentication is not compiled\"}");
+#endif
+    }
+
+    void WebUI_Server::FirmwarePackageBody(
+        AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+        if (!request->_tempObject) {
+            auto* context         = new FirmwareValidationContext();
+            context->expected     = total;
+            request->_tempObject = context;
+        }
+        auto* context = static_cast<FirmwareValidationContext*>(request->_tempObject);
+        if (index != context->validator.bytesReceived() || total != context->expected) {
+            return;
+        }
+        context->validator.write(data, len);
+    }
+
+    void WebUI_Server::handleFirmwarePackageValidation(AsyncWebServerRequest* request) {
+        if (!firmwareMutationAuthorized(request, false)) {
+            if (request->_tempObject) {
+                delete static_cast<FirmwareValidationContext*>(request->_tempObject);
+                request->_tempObject = nullptr;
+            }
+            request->send(403, "application/json", "{\"error\":\"administrator session and CSRF token required\"}");
+            return;
+        }
+        auto* context = static_cast<FirmwareValidationContext*>(request->_tempObject);
+        if (!context) {
+            request->send(400, "application/json", "{\"error\":\"package body is required\"}");
+            return;
+        }
+        TamsFirmware::ValidationResult result = context->validator.finish();
+        delete context;
+        request->_tempObject = nullptr;
+
+        std::string target =
+            request->hasHeader("X-TAMS-Target") ? request->getHeader("X-TAMS-Target")->value().c_str() : "";
+        std::string compatibilityError;
+        bool        compatible = false;
+        auto&       dial       = DialFirmwareClient::instance();
+        bool        targetExact = false;
+        bool        recoveryConfirmationRequired = false;
+        if (result.valid()) {
+            if (target == "dial") {
+                targetExact = dial.discover() && dial.state().paired && !dial.state().ambiguous && dial.refreshHealth();
+                recoveryConfirmationRequired = result.keyRecovery && result.manifest.recovery &&
+                                               result.manifest.allowDowngrade &&
+                                               result.manifest.releaseCounter <= dial.state().releaseCounter;
+                compatible = TamsFirmware::targetCompatible(result.manifest,
+                                                             "fluiddial",
+                                                             "maijker_m5dial",
+                                                             "m5dial_hmi",
+                                                             "esp32s3",
+                                                             "default_8mb_ab",
+                                                             1,
+                                                             dial.state().releaseCounter,
+                                                             recoveryConfirmationRequired,
+                                                             compatibilityError);
+            } else if (target == "controller") {
+                targetExact = true;
+                compatible = TamsFirmware::targetCompatible(result.manifest,
+                                                             "fluidnc",
+                                                             "maijker_dlc32",
+                                                             "fluidnc_controller",
+                                                             "esp32",
+                                                             "min_littlefs_ab",
+                                                             1,
+                                                             controllerReleaseCounter(),
+                                                             false,
+                                                             compatibilityError);
+            } else {
+                compatibilityError = "unknown target role";
+            }
+        }
+        std::string safetyReason;
+        bool        safe        = firmwareSafety(safetyReason);
+        bool        valid       = result.valid() && compatible;
+        lastFirmwareValidation  = { result, target, millis(), compatible };
+
+        std::string reason = result.error.empty() ? compatibilityError : result.error;
+        if (reason.empty() && !targetExact) reason = "no exact paired M5Dial is configured";
+        if (reason.empty() && !safe) reason = safetyReason;
+        if (reason.empty() && recoveryConfirmationRequired)
+            reason = "signed recovery downgrade requires green-button confirmation on the M5Dial";
+        if (reason.empty()) reason = "package, target, and machine state validated";
+        std::string json = "{\"valid\":";
+        json += valid ? "true" : "false";
+        json += ",\"safe\":";
+        json += safe ? "true" : "false";
+        json += ",\"target_exact\":";
+        json += targetExact ? "true" : "false";
+        json += ",\"recovery_confirmation_required\":";
+        json += recoveryConfirmationRequired ? "true" : "false";
+        json += ",\"manifest_sha256\":\"" + jsonEscape(result.manifestSha256) + "\",\"reason\":\"" + jsonEscape(reason) + "\",";
+        json += "\"validation\":{\"signature\":";
+        json += result.signatureValid ? "true" : "false";
+        json += ",\"hash\":";
+        json += result.imageHashValid ? "true" : "false";
+        json += ",\"product\":";
+        json += (target == "dial" ? result.manifest.product == "fluiddial" : result.manifest.product == "fluidnc") ? "true" : "false";
+        json += ",\"board\":";
+        json += (target == "dial" ? result.manifest.board == "maijker_m5dial" : result.manifest.board == "maijker_dlc32") ? "true" : "false";
+        json += ",\"hardware_role\":";
+        json +=
+            (target == "dial" ? result.manifest.hardwareRole == "m5dial_hmi" : result.manifest.hardwareRole == "fluidnc_controller")
+                ? "true"
+                : "false";
+        json += ",\"compatibility\":";
+        json += compatible ? "true" : "false";
+        json += ",\"version\":";
+        json += result.manifest.releaseCounter > 0 ? "true" : "false";
+        json += "}}";
+        sendJSON(request, valid ? 200 : 422, json);
+    }
+
+    void WebUI_Server::handleFirmwareReceipts(AsyncWebServerRequest* request) {
+        if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
+            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+            return;
+        }
+        loadFirmwareReceipts();
+        std::string json = "[";
+        bool        first = true;
+        for (auto it = firmwareReceipts.rbegin(); it != firmwareReceipts.rend(); ++it) {
+            if (!first) json += ",";
+            json += *it;
+            first = false;
+        }
+        json += "]";
+        AsyncWebServerResponse* response = request->beginResponse(200, "application/json", json.c_str());
+        response->addHeader(T_Cache_Control, T_no_cache);
+        if (request->hasParam("download")) {
+            response->addHeader("Content-Disposition", "attachment; filename=\"firmware-receipts.json\"");
+        }
+        request->send(response);
+    }
+
+    void WebUI_Server::handleFirmwarePairStart(AsyncWebServerRequest* request) {
+        if (!firmwareMutationAuthorized(request, true)) {
+            request->send(403, "application/json", "{\"error\":\"recent administrator authentication and CSRF token required\"}");
+            return;
+        }
+        if (firmwareMaintenanceLock) {
+            request->send(409, "application/json", "{\"error\":\"firmware maintenance lock is active\"}");
+            return;
+        }
+        std::string comparisonCode;
+        if (!DialFirmwareClient::instance().startPairing(comparisonCode)) {
+            sendJSON(request,
+                     409,
+                     "{\"error\":\"" + jsonEscape(DialFirmwareClient::instance().state().lastError) + "\"}");
+            return;
+        }
+        sendJSON(request,
+                 200,
+                 "{\"comparison_code\":\"" + jsonEscape(comparisonCode) +
+                     "\",\"instruction\":\"Confirm this code, then press green on the M5Dial\"}");
+    }
+
+    void WebUI_Server::handleFirmwarePairConfirm(AsyncWebServerRequest* request) {
+        if (!firmwareMutationAuthorized(request, true)) {
+            request->send(403, "application/json", "{\"error\":\"recent administrator authentication and CSRF token required\"}");
+            return;
+        }
+        String comparisonCode =
+            request->hasParam("comparison_code", true) ? request->getParam("comparison_code", true)->value() : "";
+        if (comparisonCode.length() != 6 ||
+            !DialFirmwareClient::instance().confirmPairing(comparisonCode.c_str())) {
+            request->send(409, "application/json", "{\"error\":\"pairing code was not accepted by the M5Dial\"}");
+            return;
+        }
+        request->send(202, "application/json", "{\"status\":\"waiting_for_physical_confirmation\"}");
+    }
+
+    void WebUI_Server::handleFirmwarePairStatus(AsyncWebServerRequest* request) {
+        if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
+            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+            return;
+        }
+        bool paired = DialFirmwareClient::instance().pollPairing();
+        std::string json = "{\"paired\":";
+        json += paired ? "true" : "false";
+        json += ",\"m5dial\":" + DialFirmwareClient::instance().stateJson() + "}";
+        sendJSON(request, 200, json);
+    }
+
+    void WebUI_Server::FirmwareDeploymentBody(
+        AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+        if (!request->_tempObject) {
+            auto* body          = new FirmwareDeploymentBody();
+            body->expected      = total;
+            body->overflow      = total > FirmwareBodyLimit;
+            request->_tempObject = body;
+        }
+        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        if (body->overflow || total != body->expected || index != body->bytes.size() ||
+            body->bytes.size() + len > FirmwareBodyLimit) {
+            body->overflow = true;
+            return;
+        }
+        body->bytes.insert(body->bytes.end(), data, data + len);
+    }
+
+    void WebUI_Server::handleFirmwareDeploymentRequest(AsyncWebServerRequest* request) {
+        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        auto cleanup = [&]() {
+            delete body;
+            request->_tempObject = nullptr;
+        };
+        const std::string url = request->url().c_str();
+        const std::string id  = deploymentIdFromUrl(url);
+        auto&             dial = DialFirmwareClient::instance();
+
+        if (body && (body->overflow || body->bytes.size() != body->expected)) {
+            cleanup();
+            request->send(413, "application/json", "{\"error\":\"deployment body exceeded the bounded relay size\"}");
+            return;
+        }
+
+        if (request->method() == HTTP_GET && !id.empty()) {
+            cleanup();
+            if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
+                request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+                return;
+            }
+            if (id == controllerDeployment.deploymentId) {
+                sendJSON(request, 200, controllerDeploymentJson());
+                return;
+            }
+            if (id != dial.deployment().deploymentId) {
+                request->send(404, "application/json", "{\"error\":\"deployment not found\"}");
+                return;
+            }
+            if (!dial.deployment().terminal && dial.deployment().stage >= 4) {
+                dial.discover(true);
+                dial.refreshHealth();
+            }
+            if (dial.deployment().terminal && lastRecordedDialReceipt != dial.deployment().deploymentId) {
+                dial.setReceiptPersisted(true);
+                bool persisted = appendFirmwareReceipt(dial.deployment());
+                dial.setReceiptPersisted(persisted);
+                if (persisted) lastRecordedDialReceipt = dial.deployment().deploymentId;
+                firmwareMaintenanceLock = false;
+            }
+            sendJSON(request, 200, dial.deploymentJson());
+            return;
+        }
+
+        if (!firmwareMutationAuthorized(request, true)) {
+            cleanup();
+            request->send(403, "application/json", "{\"error\":\"recent administrator authentication and CSRF token required\"}");
+            return;
+        }
+
+        if (request->method() == HTTP_POST && url == "/api/v1/firmware/deployments") {
+            std::string json           = bodyString(body);
+            std::string target         = bodyJsonString(json, "target");
+            std::string packageId      = bodyJsonString(json, "package_id");
+            std::string manifestDigest = bodyJsonString(json, "manifest_sha256");
+            cleanup();
+            if (target != "dial" && target != "controller") {
+                request->send(422, "application/json", "{\"error\":\"unknown firmware target\"}");
+                return;
+            }
+            std::string safetyReason;
+            bool validationFresh = lastFirmwareValidation.at &&
+                                   static_cast<uint32_t>(millis() - lastFirmwareValidation.at) <= 300000U;
+            if (!validationFresh || lastFirmwareValidation.target != target ||
+                !lastFirmwareValidation.result.valid() || !lastFirmwareValidation.compatible ||
+                lastFirmwareValidation.result.manifest.packageId != packageId ||
+                lastFirmwareValidation.result.manifestSha256 != manifestDigest) {
+                request->send(409, "application/json", "{\"error\":\"a matching recent signed-package validation is required\"}");
+                return;
+            }
+            if (!firmwareSafety(safetyReason)) {
+                sendJSON(request, 409, "{\"error\":\"" + jsonEscape(safetyReason) + "\"}");
+                return;
+            }
+            std::string deploymentId = randomHex(16);
+            if (target == "controller") {
+                const auto* inactive = esp_ota_get_next_update_partition(nullptr);
+                if (!inactive || lastFirmwareValidation.result.manifest.imageLength > inactive->size) {
+                    request->send(413, "application/json", "{\"error\":\"signed controller image does not fit the inactive slot\"}");
+                    return;
+                }
+                if (controllerDeployment.hashInitialized) {
+                    mbedtls_sha256_free(&controllerDeployment.imageHash);
+                    controllerDeployment.hashInitialized = false;
+                }
+                controllerDeployment.active = controllerDeployment.terminal = controllerDeployment.success = false;
+                controllerDeployment.receiptPersisted = false;
+                controllerDeployment.stage = 1;
+                controllerDeployment.acceptedOffset = 0;
+                controllerDeployment.startedAt = millis();
+                controllerDeployment.lastActivity = controllerDeployment.startedAt;
+                controllerDeployment.deploymentId = deploymentId;
+                controllerDeployment.targetPartition = inactive->label;
+                controllerDeployment.error.clear();
+                controllerDeployment.result = "receiving signed controller image";
+                controllerDeployment.package = lastFirmwareValidation.result;
+                mbedtls_sha256_init(&controllerDeployment.imageHash);
+                mbedtls_sha256_starts_ret(&controllerDeployment.imageHash, 0);
+                controllerDeployment.hashInitialized = true;
+                if (!Update.begin(controllerDeployment.package.manifest.imageLength, U_FLASH)) {
+                    mbedtls_sha256_free(&controllerDeployment.imageHash);
+                    controllerDeployment.hashInitialized = false;
+                    controllerDeployment.error = "inactive controller OTA slot could not be opened";
+                    request->send(500, "application/json", "{\"error\":\"inactive controller OTA slot could not be opened\"}");
+                    return;
+                }
+                controllerDeployment.active = true;
+                firmwareMaintenanceLock = true;
+                sendJSON(request,
+                         201,
+                         "{\"deployment_id\":\"" + deploymentId + "\",\"chunk_size\":" +
+                             std::to_string(FirmwareRelayChunkSize) + "}");
+                return;
+            }
+            if (!dial.discover(true) || !dial.state().paired || dial.state().ambiguous || !dial.refreshHealth()) {
+                request->send(409, "application/json", "{\"error\":\"the exact paired M5Dial is not authenticated and online\"}");
+                return;
+            }
+            firmwareMaintenanceLock  = true;
+            if (!dial.beginDeployment(lastFirmwareValidation.result, deploymentId)) {
+                firmwareMaintenanceLock = false;
+                sendJSON(request, 502, "{\"error\":\"" + jsonEscape(dial.state().lastError) + "\"}");
+                return;
+            }
+            sendJSON(request,
+                     201,
+                     "{\"deployment_id\":\"" + deploymentId + "\",\"chunk_size\":" +
+                         std::to_string(FirmwareRelayChunkSize) + "}");
+            return;
+        }
+
+        bool controllerTarget = !id.empty() && id == controllerDeployment.deploymentId;
+        if (id.empty() || (!controllerTarget && id != dial.deployment().deploymentId)) {
+            cleanup();
+            request->send(404, "application/json", "{\"error\":\"deployment not found\"}");
+            return;
+        }
+
+        if (request->method() == HTTP_PUT && url.find("/chunks") != std::string::npos) {
+            uint32_t offset =
+                request->hasParam("offset") ? static_cast<uint32_t>(request->getParam("offset")->value().toInt()) : UINT32_MAX;
+            bool ok = false;
+            if (controllerTarget) {
+                ok = controllerDeployment.active && body && !body->bytes.empty() &&
+                     offset == controllerDeployment.acceptedOffset &&
+                     controllerDeployment.acceptedOffset + body->bytes.size() <=
+                         controllerDeployment.package.manifest.imageLength &&
+                     Update.write(body->bytes.data(), body->bytes.size()) == body->bytes.size();
+                if (ok) {
+                    mbedtls_sha256_update_ret(
+                        &controllerDeployment.imageHash, body->bytes.data(), body->bytes.size());
+                    controllerDeployment.acceptedOffset += body->bytes.size();
+                    controllerDeployment.lastActivity = millis();
+                    controllerDeployment.stage = 2;
+                } else {
+                    controllerDeployment.error = "controller chunk offset, size, or flash write failed";
+                }
+            } else {
+                ok = body && !body->bytes.empty() &&
+                     dial.relayChunk(offset, body->bytes.data(), body->bytes.size());
+            }
+            cleanup();
+            if (!ok) {
+                sendJSON(request,
+                         409,
+                         "{\"error\":\"" +
+                             jsonEscape(controllerTarget ? controllerDeployment.error : dial.deployment().error) + "\"}");
+                return;
+            }
+            sendJSON(request,
+                     200,
+                     "{\"accepted_offset\":" +
+                         std::to_string(controllerTarget ? controllerDeployment.acceptedOffset
+                                                         : dial.deployment().acceptedOffset) +
+                         "}");
+            return;
+        }
+        cleanup();
+
+        if (request->method() == HTTP_POST && url.find("/commit") != std::string::npos) {
+            if (controllerTarget) {
+                if (!controllerDeployment.active ||
+                    controllerDeployment.acceptedOffset != controllerDeployment.package.manifest.imageLength) {
+                    request->send(409, "application/json", "{\"error\":\"controller image transfer is incomplete\"}");
+                    return;
+                }
+                uint8_t digest[32];
+                mbedtls_sha256_finish_ret(&controllerDeployment.imageHash, digest);
+                static const char hex[] = "0123456789abcdef";
+                std::string actual(64, '0');
+                for (size_t index = 0; index < sizeof(digest); ++index) {
+                    actual[index * 2] = hex[digest[index] >> 4];
+                    actual[index * 2 + 1] = hex[digest[index] & 0x0f];
+                }
+                memset(digest, 0, sizeof(digest));
+                mbedtls_sha256_free(&controllerDeployment.imageHash);
+                controllerDeployment.hashInitialized = false;
+                if (actual != controllerDeployment.package.manifest.imageSha256 || !Update.end(false)) {
+                    Update.abort();
+                    controllerDeployment.active = false;
+                    controllerDeployment.terminal = true;
+                    controllerDeployment.error = "controller image hash or ESP image validation failed";
+                    controllerDeployment.result = "failed";
+                    firmwareMaintenanceLock = false;
+                    controllerDeployment.receiptPersisted = appendControllerFirmwareReceipt();
+                    sendJSON(request, 422, controllerDeploymentJson());
+                    return;
+                }
+                controllerDeployment.active = false;
+                controllerDeployment.terminal = true;
+                controllerDeployment.success = true;
+                controllerDeployment.stage = 8;
+                controllerDeployment.result = "verified_rebooting";
+                controllerDeployment.lastActivity = millis();
+                Preferences preferences;
+                preferences.begin("tamsfw", false);
+                preferences.putBool("pending", true);
+                preferences.putULong("pending_rel", controllerDeployment.package.manifest.releaseCounter);
+                preferences.putString("pending_ver", controllerDeployment.package.manifest.version.c_str());
+                preferences.putString("pending_id", controllerDeployment.deploymentId.c_str());
+                preferences.putString("pending_part", controllerDeployment.targetPartition.c_str());
+                preferences.end();
+                controllerDeployment.receiptPersisted = appendControllerFirmwareReceipt();
+                _schedule_reboot_time = millis() + 3000;
+                _schedule_reboot = true;
+                sendJSON(request, 200, controllerDeploymentJson());
+                return;
+            }
+            if (!dial.commitDeployment()) {
+                sendJSON(request, 409, "{\"error\":\"" + jsonEscape(dial.deployment().error) + "\"}");
+                return;
+            }
+            sendJSON(request, 200, dial.deploymentJson());
+            return;
+        }
+        if (request->method() == HTTP_POST && url.find("/abort") != std::string::npos) {
+            if (controllerTarget) {
+                if (controllerDeployment.active) Update.abort();
+                if (controllerDeployment.hashInitialized) {
+                    mbedtls_sha256_free(&controllerDeployment.imageHash);
+                    controllerDeployment.hashInitialized = false;
+                }
+                controllerDeployment.active = false;
+                controllerDeployment.terminal = true;
+                controllerDeployment.success = false;
+                controllerDeployment.result = "aborted";
+                firmwareMaintenanceLock = false;
+                controllerDeployment.receiptPersisted = appendControllerFirmwareReceipt();
+                sendJSON(request, 200, controllerDeploymentJson());
+                return;
+            }
+            dial.abortDeployment();
+            firmwareMaintenanceLock = false;
+            dial.setReceiptPersisted(true);
+            bool persisted = appendFirmwareReceipt(dial.deployment());
+            dial.setReceiptPersisted(persisted);
+            if (persisted) lastRecordedDialReceipt = dial.deployment().deploymentId;
+            sendJSON(request, 200, dial.deploymentJson());
+            return;
+        }
+        request->send(405, "application/json", "{\"error\":\"unsupported deployment operation\"}");
+    }
+
+    void WebUI_Server::LatheApiBody(
+        AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+        if (!request->_tempObject) {
+            auto* body           = new FirmwareDeploymentBody();
+            body->expected       = total;
+            body->overflow       = total > 1024;
+            request->_tempObject = body;
+        }
+        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        if (body->overflow || total != body->expected || index != body->bytes.size() || body->bytes.size() + len > 1024) {
+            body->overflow = true;
+            return;
+        }
+        body->bytes.insert(body->bytes.end(), data, data + len);
+    }
+
+    void WebUI_Server::handleLatheApiRequest(AsyncWebServerRequest* request) {
+        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        auto cleanup = [&]() {
+            delete body;
+            request->_tempObject = nullptr;
+        };
+        if (request->method() != HTTP_POST) {
+            cleanup();
+            request->send(405, "application/json", "{\"error\":\"lathe control APIs require POST\"}");
+            return;
+        }
+        if (!firmwareMutationAuthorized(request, false)) {
+            cleanup();
+            request->send(403, "application/json", "{\"error\":\"administrator session and CSRF token required\"}");
+            return;
+        }
+        if (firmwareMaintenanceLock) {
+            cleanup();
+            request->send(423, "application/json", "{\"error\":\"firmware maintenance lock rejects machine-control actions\"}");
+            return;
+        }
+        if (!Lathe::enabled()) {
+            cleanup();
+            request->send(409, "application/json", "{\"error\":\"the active configuration is not a confirmed lathe\"}");
+            return;
+        }
+        if (!body || body->overflow || body->bytes.size() != body->expected) {
+            cleanup();
+            request->send(400, "application/json", "{\"error\":\"a bounded JSON body is required\"}");
+            return;
+        }
+
+        const std::string url  = request->url().c_str();
+        const std::string json = bodyString(body);
+        cleanup();
+        char command[128] = {};
+
+        if (url == "/api/v1/lathe/spindle-stop") {
+            synchronousCommand(request, "M5", true, AuthenticationLevel::LEVEL_ADMIN);
+            return;
+        }
+
+        Lathe::SharedChuckMode allowedChuckMode = Lathe::SharedChuckMode::Idle;
+        if (url == "/api/v1/lathe/spindle") {
+            allowedChuckMode = Lathe::SharedChuckMode::Spindle;
+        } else if (url == "/api/v1/lathe/chuck") {
+            allowedChuckMode = Lathe::SharedChuckMode::Unavailable;
+        } else if (url == "/api/v1/lathe/jog" && bodyJsonString(json, "axis") == "C") {
+            allowedChuckMode = Lathe::SharedChuckMode::CPositioning;
+        }
+        std::string safetyReason;
+        if (!latheControlSafety(safetyReason, allowedChuckMode)) {
+            sendJSON(request, 409, "{\"error\":\"" + jsonEscape(safetyReason) + "\"}");
+            return;
+        }
+
+        if (url == "/api/v1/lathe/jog") {
+            std::string axis = bodyJsonString(json, "axis");
+            double direction = 0, increment = 0, feed = 0;
+            if (!bodyJsonNumber(json, "direction", direction) || !bodyJsonNumber(json, "increment", increment) ||
+                !bodyJsonNumber(json, "feed", feed) || (axis != "X" && axis != "Z" && axis != "C") ||
+                (direction != -1.0 && direction != 1.0) || increment <= 0.0 || increment > 360.0 ||
+                feed < 1.0 || feed > 2000.0) {
+                request->send(422, "application/json", "{\"error\":\"invalid bounded jog request\"}");
+                return;
+            }
+            if (axis == "C" &&
+                (!Lathe::encoder_enabled() || !Lathe::shared_chuck_enabled() ||
+                 Lathe::shared_chuck_mode() != Lathe::SharedChuckMode::CPositioning)) {
+                request->send(409,
+                              "application/json",
+                              "{\"error\":\"C positioning requires commissioned encoder feedback and C-positioning chuck ownership\"}");
+                return;
+            }
+            if (axis != "C" && increment > 10.0) {
+                request->send(422, "application/json", "{\"error\":\"linear jog increment exceeds 10 mm\"}");
+                return;
+            }
+            snprintf(command,
+                     sizeof(command),
+                     "$J=G91 G21 %s%.4f F%.1f",
+                     axis.c_str(),
+                     increment * direction,
+                     feed);
+        } else if (url == "/api/v1/lathe/spindle") {
+            std::string direction = bodyJsonString(json, "direction");
+            double      rpm       = 0;
+            if (!bodyJsonNumber(json, "rpm", rpm) || rpm <= 0.0 || rpm > 10000.0 ||
+                (direction != "cw" && direction != "ccw")) {
+                request->send(422, "application/json", "{\"error\":\"invalid spindle direction or RPM\"}");
+                return;
+            }
+            if (Lathe::shared_chuck_enabled() && Lathe::shared_chuck_mode() != Lathe::SharedChuckMode::Spindle) {
+                request->send(409, "application/json", "{\"error\":\"shared chuck ownership is not assigned to the spindle\"}");
+                return;
+            }
+            snprintf(command, sizeof(command), "%s S%.1f", direction == "cw" ? "M3" : "M4", rpm);
+        } else if (url == "/api/v1/lathe/turret") {
+            double tool = 0;
+            auto   status = ATCs::maijker_turret_status();
+            if (!bodyJsonNumber(json, "tool", tool) || floor(tool) != tool || tool < 1.0 ||
+                tool > status.station_count || !status.configured || status.target_tool != 0) {
+                request->send(409, "application/json", "{\"error\":\"turret target is invalid or the turret is not idle\"}");
+                return;
+            }
+            snprintf(command, sizeof(command), "T%d M6", static_cast<int>(tool));
+        } else if (url == "/api/v1/lathe/turret/confirm") {
+            double tool = 0;
+            auto   status = ATCs::maijker_turret_status();
+            if (!bodyJsonTrue(json, "visual_inspection") || !bodyJsonNumber(json, "tool", tool) ||
+                floor(tool) != tool || tool < 1.0 || tool > status.station_count || !status.configured) {
+                request->send(422, "application/json", "{\"error\":\"explicit visual station confirmation is required\"}");
+                return;
+            }
+            snprintf(command, sizeof(command), "M61 Q%d", static_cast<int>(tool));
+        } else if (url == "/api/v1/lathe/tool") {
+            double tool = 0, gx = 0, gz = 0, wx = 0, wz = 0, radius = 0, orientation = 0;
+            if (!bodyJsonNumber(json, "tool", tool) || !bodyJsonNumber(json, "geometry_x", gx) ||
+                !bodyJsonNumber(json, "geometry_z", gz) || !bodyJsonNumber(json, "wear_x", wx) ||
+                !bodyJsonNumber(json, "wear_z", wz) || !bodyJsonNumber(json, "nose_radius", radius) ||
+                !bodyJsonNumber(json, "orientation", orientation) || floor(tool) != tool || tool < 1 || tool > 5 ||
+                fabs(gx) > 1000 || fabs(gz) > 1000 || fabs(wx) > 100 || fabs(wz) > 100 || radius < 0 ||
+                radius > 100 || floor(orientation) != orientation || orientation < 0 || orientation > 9) {
+                request->send(422, "application/json", "{\"error\":\"invalid bounded tool geometry\"}");
+                return;
+            }
+            snprintf(command,
+                     sizeof(command),
+                     "[ESP422]T=%d GX=%.4f GZ=%.4f WX=%.4f WZ=%.4f NR=%.4f O=%d",
+                     static_cast<int>(tool),
+                     gx,
+                     gz,
+                     wx,
+                     wz,
+                     radius,
+                     static_cast<int>(orientation));
+        } else if (url == "/api/v1/lathe/touch-off") {
+            double      tool = 0, machine = 0, reference = 0;
+            std::string axis = bodyJsonString(json, "axis");
+            std::string mode = bodyJsonString(json, "mode");
+            if (!bodyJsonNumber(json, "tool", tool) || !bodyJsonNumber(json, "machine", machine) ||
+                !bodyJsonNumber(json, "reference", reference) || floor(tool) != tool || tool < 1 || tool > 5 ||
+                (axis != "X" && axis != "Z") || (mode != "diameter" && mode != "radius") ||
+                fabs(machine) > 10000 || fabs(reference) > 10000) {
+                request->send(422, "application/json", "{\"error\":\"invalid explicit touch-off request\"}");
+                return;
+            }
+            snprintf(command,
+                     sizeof(command),
+                     axis == "X" ? "[ESP423]T=%d MX=%.4f RX=%.4f MODE=%s"
+                                 : "[ESP423]T=%d MZ=%.4f RZ=%.4f MODE=%s",
+                     static_cast<int>(tool),
+                     machine,
+                     reference,
+                     mode.c_str());
+        } else if (url == "/api/v1/lathe/chuck") {
+            std::string mode = bodyJsonString(json, "mode");
+            if (!Lathe::shared_chuck_enabled() ||
+                (mode != "idle" && mode != "c_positioning" && mode != "spindle")) {
+                request->send(422, "application/json", "{\"error\":\"invalid or unavailable shared-chuck ownership mode\"}");
+                return;
+            }
+            const char* value = mode == "idle" ? "IDLE" : mode == "c_positioning" ? "C_POSITIONING" : "SPINDLE";
+            snprintf(command, sizeof(command), "[ESP426]MODE=%s", value);
+        } else {
+            request->send(404, "application/json", "{\"error\":\"unknown typed lathe action\"}");
+            return;
+        }
+
+        synchronousCommand(request, command, true, AuthenticationLevel::LEVEL_ADMIN);
+    }
+
     void WebUI_Server::handleFileOps(AsyncWebServerRequest* request, const Volume& fs) {
         //this is only for admin and user
-        if (is_authenticated() == AuthenticationLevel::LEVEL_GUEST) {
+        if (is_authenticated(request) == AuthenticationLevel::LEVEL_GUEST) {
             _upload_status = UploadStatus::NONE;
             sendAuthFailed(request);
             return;
@@ -1399,10 +2572,38 @@ namespace WebUI {
 
     void WebUI_Server::poll() {
         static uint32_t start_time = millis();
+        auto& dial = DialFirmwareClient::instance();
+        if (controllerDeployment.active && controllerDeployment.lastActivity &&
+            static_cast<uint32_t>(millis() - controllerDeployment.lastActivity) > 90000U) {
+            Update.abort();
+            if (controllerDeployment.hashInitialized) {
+                mbedtls_sha256_free(&controllerDeployment.imageHash);
+                controllerDeployment.hashInitialized = false;
+            }
+            controllerDeployment.active = false;
+            controllerDeployment.terminal = true;
+            controllerDeployment.success = false;
+            controllerDeployment.stage = 8;
+            controllerDeployment.error = "controller deployment timed out";
+            controllerDeployment.result = "timeout";
+            firmwareMaintenanceLock = false;
+            controllerDeployment.receiptPersisted = appendControllerFirmwareReceipt();
+        }
+        if (!dial.deployment().terminal && dial.deployment().lastActivity &&
+            static_cast<uint32_t>(millis() - dial.deployment().lastActivity) > 180000U) {
+            dial.expireDeployment("M5Dial deployment timed out before verified reconnection");
+            firmwareMaintenanceLock = false;
+            if (lastRecordedDialReceipt != dial.deployment().deploymentId) {
+                dial.setReceiptPersisted(true);
+                bool persisted = appendFirmwareReceipt(dial.deployment());
+                dial.setReceiptPersisted(persisted);
+                if (persisted) lastRecordedDialReceipt = dial.deployment().deploymentId;
+            }
+        }
         if (WiFi.getMode() == WIFI_AP) {
             dnsServer.processNextRequest();
         }
-        if (_schedule_reboot and _schedule_reboot_time == millis()) {
+        if (_schedule_reboot && static_cast<int32_t>(millis() - _schedule_reboot_time) >= 0) {
             _schedule_reboot = false;
             protocol_send_event(&fullResetEvent);
         }
@@ -1418,22 +2619,77 @@ namespace WebUI {
     }
 
     //check authentication
-    AuthenticationLevel WebUI_Server::is_authenticated() {
+    AuthenticationLevel WebUI_Server::is_authenticated(AsyncWebServerRequest* request) {
 #ifdef ENABLE_AUTHENTICATION
-        if (_webserver->hasHeader("Cookie")) {
-            std::string cookie(_webserver->header("Cookie").c_str());
-            size_t      pos = cookie.find("ESPSESSIONID=");
-            if (pos != std::string::npos) {
-                size_t      pos2      = cookie.find(";", pos);
-                std::string sessionID = cookie.substr(pos + strlen("ESPSESSIONID="), pos2);
-                IPAddress   ip        = _webserver->client().remoteIP();
-                //check if cookie can be reset and clean table in same time
-                return ResetAuthIP(ip, sessionID.c_str());
-            }
+        AuthenticationIP* auth = getAuthForRequest(request);
+        if (!auth) return AuthenticationLevel::LEVEL_GUEST;
+        if (static_cast<uint32_t>(millis() - auth->last_time) > 360000U) {
+            IPAddress remote = auth->ip;
+            char sessionID[sizeof(auth->sessionID)];
+            strncpy(sessionID, auth->sessionID, sizeof(sessionID) - 1);
+            sessionID[sizeof(sessionID) - 1] = '\0';
+            ClearAuthIP(remote, sessionID);
+            return AuthenticationLevel::LEVEL_GUEST;
         }
-        return AuthenticationLevel::LEVEL_GUEST;
+        auth->last_time = millis();
+        return auth->level;
 #else
+        (void)request;
         return AuthenticationLevel::LEVEL_ADMIN;
+#endif
+    }
+
+#ifdef ENABLE_AUTHENTICATION
+    AuthenticationIP* WebUI_Server::getAuthForRequest(AsyncWebServerRequest* request) {
+        if (!request || !request->hasHeader("Cookie")) {
+            return nullptr;
+        }
+        std::string cookie(request->getHeader("Cookie")->value().c_str());
+        size_t      pos = cookie.find("ESPSESSIONID=");
+        if (pos == std::string::npos) {
+            return nullptr;
+        }
+        pos += strlen("ESPSESSIONID=");
+        size_t end = cookie.find(';', pos);
+        std::string sessionID = cookie.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        IPAddress remote = request->client()->remoteIP();
+        return GetAuth(remote, sessionID.c_str());
+    }
+#endif
+
+    bool WebUI_Server::firmwareMutationAuthorized(AsyncWebServerRequest* request, bool requireRecentPassword) {
+#ifdef ENABLE_AUTHENTICATION
+        AuthenticationIP* auth = getAuthForRequest(request);
+        if (!auth || auth->level != AuthenticationLevel::LEVEL_ADMIN) {
+            return false;
+        }
+        if (authentication_admin_password_is_default()) {
+            return false;
+        }
+        if (static_cast<uint32_t>(millis() - auth->last_time) > 360000U) {
+            return false;
+        }
+        auth->last_time = millis();
+        if (requireRecentPassword && (uint32_t)(millis() - auth->authenticated_at) > 300000U) {
+            return false;
+        }
+        if (!request->hasHeader("X-CSRF-Token")) {
+            return false;
+        }
+        String supplied = request->getHeader("X-CSRF-Token")->value();
+        size_t expected_length = strlen(auth->csrfToken);
+        if (supplied.length() != expected_length) {
+            return false;
+        }
+        uint8_t difference = 0;
+        for (size_t index = 0; index < expected_length; ++index) {
+            difference |= static_cast<uint8_t>(supplied[index] ^ auth->csrfToken[index]);
+        }
+        return difference == 0;
+#else
+        (void)request;
+        (void)requireRecentPassword;
+        return false;
 #endif
     }
 
@@ -1441,7 +2697,7 @@ namespace WebUI {
 
     //add the information in the linked list if possible
     bool WebUI_Server::AddAuthIP(AuthenticationIP* item) {
-        if (_nb_ip > MAX_AUTH_IP) {
+        if (_nb_ip >= MAX_AUTH_IP) {
             return false;
         }
         item->_next = _head;
@@ -1450,32 +2706,26 @@ namespace WebUI {
         return true;
     }
 
-    //Session ID based on IP and time using 16 char
+    namespace {
+        const char* random_hex_token(char (&token)[33]) {
+            uint8_t bytes[16];
+            esp_fill_random(bytes, sizeof(bytes));
+            for (size_t i = 0; i < sizeof(bytes); ++i) {
+                snprintf(token + (i * 2), 3, "%02x", bytes[i]);
+            }
+            token[32] = '\0';
+            return token;
+        }
+    }
+
     const char* WebUI_Server::create_session_ID() {
-        static char sessionID[17];
-        //reset SESSIONID
-        for (size_t i = 0; i < 17; i++) {
-            sessionID[i] = '\0';
-        }
-        //get time
-        uint32_t now = millis();
-        //get remote IP
-        IPAddress remoteIP = _webserver->client().remoteIP();
-        //generate SESSIONID
-        if (0 > snprintf(sessionID,
-                         17,
-                         "%02X%02X%02X%02X%02X%02X%02X%02X",
-                         remoteIP[0],
-                         remoteIP[1],
-                         remoteIP[2],
-                         remoteIP[3],
-                         (uint8_t)((now >> 0) & 0xff),
-                         (uint8_t)((now >> 8) & 0xff),
-                         (uint8_t)((now >> 16) & 0xff),
-                         (uint8_t)((now >> 24) & 0xff))) {
-            strcpy(sessionID, "NONE");
-        }
-        return sessionID;
+        static char sessionID[33];
+        return random_hex_token(sessionID);
+    }
+
+    const char* WebUI_Server::create_csrf_token() {
+        static char csrfToken[33];
+        return random_hex_token(csrfToken);
     }
 
     bool WebUI_Server::ClearAuthIP(IPAddress ip, const char* sessionID) {

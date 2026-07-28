@@ -9,6 +9,7 @@
 */
 
 #include "Settings.h"
+#include "Authentication.h"
 #include "Machine/MachineConfig.h"
 #include "Configuration/JsonGenerator.h"
 #include "Report.h"  // git_info
@@ -57,10 +58,10 @@ namespace WebUI {
 #ifdef ENABLE_AUTHENTICATION
         static Error setUserPassword(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP555
             if (*parameter == '\0') {
-                user_password->setDefault();
+                authentication_reset_user_password();
                 return Error::Ok;
             }
-            if (user_password->setStringValue(parameter) != Error::Ok) {
+            if (!authentication_set_password(false, parameter)) {
                 log_string(out, "Invalid Password");
                 return Error::InvalidValue;
             }

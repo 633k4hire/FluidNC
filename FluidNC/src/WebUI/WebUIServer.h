@@ -20,6 +20,12 @@ class AsyncWebServerRequest;
 class AsyncClient;
 
 namespace WebUI {
+    bool firmwareMaintenanceActive();
+    bool firmwareCommandAllowedDuringMaintenance(const char* command);
+
+    class FirmwareDeploymentHandler;
+    class LatheApiHandler;
+
     static const int DEFAULT_HTTP_STATE                 = 1;
     static const int DEFAULT_HTTP_BLOCKED_DURING_MOTION = 1;
     static const int DEFAULT_HTTP_PORT                  = 80;
@@ -35,8 +41,10 @@ namespace WebUI {
         IPAddress           ip;
         AuthenticationLevel level;
         char                userID[17];
-        char                sessionID[17];
+        char                sessionID[33];
+        char                csrfToken[33];
         uint32_t            last_time;
+        uint32_t            authenticated_at;
         AuthenticationIP*   _next;
     };
 #endif
@@ -47,6 +55,9 @@ namespace WebUI {
     enum class UploadStatus : uint8_t { NONE = 0, FAILED = 1, CANCELLED = 2, SUCCESSFUL = 3, ONGOING = 4 };
 
     class WebUI_Server : public Module {
+        friend class FirmwareDeploymentHandler;
+        friend class LatheApiHandler;
+
     public:
         WebUI_Server(const char* name) : Module(name) {}
 
@@ -74,17 +85,20 @@ namespace WebUI {
         static bool         _schedule_reboot;
         static uint32_t     _schedule_reboot_time;
 
-        static AuthenticationLevel is_authenticated();
+        static AuthenticationLevel is_authenticated(AsyncWebServerRequest* request);
 #ifdef ENABLE_AUTHENTICATION
         static AuthenticationIP*   _head;
         static uint8_t             _nb_ip;
         static bool                AddAuthIP(AuthenticationIP* item);
         static const char*         create_session_ID();
+        static const char*         create_csrf_token();
         static bool                ClearAuthIP(IPAddress ip, const char* sessionID);
         static AuthenticationIP*   GetAuth(IPAddress ip, const char* sessionID);
         static AuthenticationLevel ResetAuthIP(IPAddress ip, const char* sessionID);
+        static AuthenticationIP*   getAuthForRequest(AsyncWebServerRequest* request);
 #endif
         static std::string getSessionCookie(AsyncWebServerRequest* request);
+        static bool firmwareMutationAuthorized(AsyncWebServerRequest* request, bool requireRecentPassword = true);
         static void        handle_SSDP();
         static void        handle_root(AsyncWebServerRequest* request);
         static void        handle_login(AsyncWebServerRequest* request);
@@ -101,6 +115,18 @@ namespace WebUI {
         static void handleFileList(AsyncWebServerRequest* request);
         static void handleUpdate(AsyncWebServerRequest* request);
         static void WebUpdateUpload(AsyncWebServerRequest* request, String filename, size_t index, uint8_t* data, size_t len, bool final);
+        static void handleFirmwareDevices(AsyncWebServerRequest* request);
+        static void handleFirmwarePackageValidation(AsyncWebServerRequest* request);
+        static void FirmwarePackageBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total);
+        static void handleFirmwareReceipts(AsyncWebServerRequest* request);
+        static void handleFirmwarePairStart(AsyncWebServerRequest* request);
+        static void handleFirmwarePairConfirm(AsyncWebServerRequest* request);
+        static void handleFirmwarePairStatus(AsyncWebServerRequest* request);
+        static void handleFirmwareDeploymentRequest(AsyncWebServerRequest* request);
+        static void FirmwareDeploymentBody(
+            AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total);
+        static void handleLatheApiRequest(AsyncWebServerRequest* request);
+        static void LatheApiBody(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total);
 
         static bool myStreamFile(AsyncWebServerRequest* request, const char* path, bool download = false, bool setSession = false);
 

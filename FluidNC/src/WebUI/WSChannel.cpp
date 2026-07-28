@@ -270,6 +270,9 @@ namespace WebUI {
                             if (msg.rfind("PING:", 0) == 0) {
                                 std::string response("PING:60000:60000");
                                 wsChannel->sendTXT(response);
+                            } else if (firmwareMaintenanceActive()) {
+                                std::string response("error:Firmware maintenance lock rejects machine-control input\n");
+                                wsChannel->sendTXT(response);
                             } else {
                                 wsChannel->push(data, len);
                             }
