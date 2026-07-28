@@ -10,9 +10,6 @@ jobs:
         include:
           - os: ubuntu-latest
             pio_env: wifi
-            pio_env_variant: ""
-          - os: ubuntu-latest
-            pio_env: wifi
             pio_env_variant: "_s3"
           - os: ubuntu-latest
             pio_env: maijker_wifi
