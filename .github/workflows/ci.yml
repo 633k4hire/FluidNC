@@ -6,19 +6,16 @@ jobs:
   build:
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-        # - macos-latest
-        # - windows-latest
-        pio_env:
-          - wifi
-        # - bt
-        # - noradio
-        # - wifibt
-        # - debug
-        pio_env_variant:
-          - ""
-          - "_s3"
+        include:
+          - os: ubuntu-latest
+            pio_env: wifi
+            pio_env_variant: ""
+          - os: ubuntu-latest
+            pio_env: wifi
+            pio_env_variant: "_s3"
+          - os: ubuntu-latest
+            pio_env: maijker_wifi
+            pio_env_variant: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -56,6 +53,7 @@ jobs:
           path: |
             .pio/build/${{ matrix.pio_env }}${{ matrix.pio_env_variant }}/firmware.*
             .pio/build/${{ matrix.pio_env }}${{ matrix.pio_env_variant }}/partitions.bin
+            .pio/build/${{ matrix.pio_env }}${{ matrix.pio_env_variant }}/bootloader.bin
 
   tests:
     strategy:

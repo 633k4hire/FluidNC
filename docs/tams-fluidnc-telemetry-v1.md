@@ -68,6 +68,19 @@ machine
   availability
   alarm_code
   alarm
+  alarm_active
+  alarm_native_code
+  alarm_source
+  alarm_native_severity
+alarm_history[] (oldest to newest, maximum 16 records per boot)
+  sequence
+  occurred_uptime_ms
+  code
+  native_code
+  source
+  native_severity
+  text
+  active
 execution
   state
   controller_mode
@@ -130,6 +143,20 @@ tool
   z_offset_mm
   nose_radius_mm
   orientation
+assets
+  cutting_tools[] (configured tools only; empty stations are omitted)
+    asset_id
+    tool_id
+    serial_number
+    station
+    active
+    status
+    geometry_x_mm
+    geometry_z_mm
+    wear_x_mm
+    wear_z_mm
+    nose_radius_mm
+    orientation
 turret
   configured
   station_count
@@ -177,6 +204,23 @@ conditions[]
   text
 ```
 
+### Alarm and asset semantics
+
+Each native `ExecAlarm` has a stable `FLUIDNC_ALARM_nn` code, a bounded
+source (`LIMIT`, `PROBE`, `MOTION`, `SPINDLE`, `PROGRAM`, or `CONTROLLER`),
+and native severity (`FAULT` or `CRITICAL`). Alarm records are captured in
+normal protocol-task context, never from an interrupt, and retained in a
+fixed 16-entry RAM ring for the current boot. Clearing an alarm sets
+`machine.alarm_active` false without erasing the ring, allowing the adapter to
+publish the corresponding MTConnect `NORMAL` transition and retain bounded
+diagnostic history. A reboot is evident from `uptime_ms` and resets the ring.
+
+`assets.cutting_tools` includes only tool records actually stored by the
+controller. It never invents assets for empty turret stations. The stable
+controller-side asset identifier is used as `serial_number` because this
+firmware has no manufacturer-marked tool serial input; consumers must not
+present it as a physical manufacturer serial.
+
 ### Representative snapshot
 
 The example is formatted for review. Firmware sends the same object on one
@@ -196,8 +240,13 @@ physical line.
     "state": "Cycle",
     "availability": "AVAILABLE",
     "alarm_code": 0,
-    "alarm": "None"
+    "alarm": "None",
+    "alarm_active": false,
+    "alarm_native_code": "FLUIDNC_ALARM_00",
+    "alarm_source": "CONTROLLER",
+    "alarm_native_severity": "NORMAL"
   },
+  "alarm_history": [],
   "execution": {
     "state": "ACTIVE",
     "controller_mode": "AUTOMATIC",
@@ -285,6 +334,9 @@ physical line.
     "z_offset_mm": -0.05,
     "nose_radius_mm": 0.4,
     "orientation": 3
+  },
+  "assets": {
+    "cutting_tools": []
   },
   "turret": {
     "configured": true,
@@ -449,11 +501,13 @@ condition remains present.
 The telemetry firmware uses the machine-specific OTA-safe build environment:
 
 ```powershell
-$env:PLATFORMIO_CORE_DIR = 'C:\Users\Matthew Metzger\.platformio'
+$env:PLATFORMIO_CORE_DIR = 'C:\repos\FluidNC\.pio-core'
 pio run -e maijker_wifi
 ```
 
 `maijker_wifi` omits the unused onboard-OLED implementation because the
 machine uses the external TAMS LVGL HMI. That keeps the firmware within the
 standard 4 MiB `min_littlefs.csv` layout with two equal OTA application slots
-and enough LittleFS space for the bundled WebUI/configuration files.
+and enough LittleFS space for the bundled WebUI/configuration files. The
+repository pins PlatformIO `espressif32` 6.9.0 so builds do not silently move
+to an incompatible framework/toolchain family.

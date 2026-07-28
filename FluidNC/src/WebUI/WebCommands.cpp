@@ -366,6 +366,9 @@ namespace WebUI {
             const auto coolant        = config->_coolant->get_state();
             const auto limit_state    = limits_get_state();
             const auto unhomed_axes   = Machine::Homing::unhomed_axes();
+            AlarmTelemetryRecord alarm_history[AlarmTelemetryCapacity] = {};
+            const size_t alarm_history_count =
+                copy_alarm_telemetry(alarm_history, AlarmTelemetryCapacity);
 
             bool estop_configured = false;
             bool estop_active     = false;
@@ -389,7 +392,37 @@ namespace WebUI {
             json_number(j, "alarm_code", static_cast<uint64_t>(lastAlarm));
             const char* alarm_name = alarmString(lastAlarm);
             j.member("alarm", alarm_name == nullptr ? "UNKNOWN" : alarm_name);
+            const bool alarm_state =
+                sys.state() == State::Alarm ||
+                sys.state() == State::Critical ||
+                sys.state() == State::ConfigAlarm;
+            json_bool(j, "alarm_active", alarm_state && lastAlarm != ExecAlarm::None);
+            j.member("alarm_native_code", alarm_native_code(lastAlarm));
+            j.member("alarm_source", alarm_source(lastAlarm));
+            j.member("alarm_native_severity", alarm_native_severity(lastAlarm));
             j.end_object();
+
+            j.begin_array("alarm_history");
+            for (size_t index = 0; index < alarm_history_count; ++index) {
+                const auto& alarm_record = alarm_history[index];
+                j.begin_object();
+                json_number(j, "sequence", static_cast<uint64_t>(alarm_record.sequence));
+                json_number(j, "occurred_uptime_ms", static_cast<uint64_t>(alarm_record.occurred_uptime_ms));
+                json_number(j, "code", static_cast<uint64_t>(alarm_record.code));
+                j.member("native_code", alarm_native_code(alarm_record.code));
+                j.member("source", alarm_source(alarm_record.code));
+                j.member("native_severity", alarm_native_severity(alarm_record.code));
+                const char* history_text = alarmString(alarm_record.code);
+                j.member("text", history_text == nullptr ? "Unknown controller alarm" : history_text);
+                json_bool(
+                    j,
+                    "active",
+                    alarm_state &&
+                        alarm_record.code == lastAlarm &&
+                        index + 1 == alarm_history_count);
+                j.end_object();
+            }
+            j.end_array();
 
             j.begin_member_object("execution");
             j.member("state", execution_name(sys.state()));
@@ -491,6 +524,36 @@ namespace WebUI {
             json_number(j, "orientation", static_cast<uint64_t>(active_tool.orientation));
             j.end_object();
 
+            j.begin_member_object("assets");
+            j.begin_array("cutting_tools");
+            for (uint32_t station = 1; station <= 5; ++station) {
+                const auto tool_data = Lathe::get_tool_data(station);
+                if (!tool_data.has_value()) {
+                    continue;
+                }
+                const std::string station_text = std::to_string(station);
+                const std::string asset_id = "maijker-tool-" + station_text;
+                j.begin_object();
+                j.member("asset_id", asset_id);
+                j.member("tool_id", "T" + station_text);
+                // FluidNC does not know a manufacturer serial number. This
+                // stable controller-side identity satisfies the required
+                // CuttingTool serialNumber without claiming a physical mark.
+                j.member("serial_number", asset_id);
+                json_number(j, "station", static_cast<uint64_t>(station));
+                json_bool(j, "active", active_tool.valid && active_tool.tool_number == station);
+                j.member("status", "AVAILABLE");
+                json_number(j, "geometry_x_mm", tool_data->geometry_x_mm);
+                json_number(j, "geometry_z_mm", tool_data->geometry_z_mm);
+                json_number(j, "wear_x_mm", tool_data->wear_x_mm);
+                json_number(j, "wear_z_mm", tool_data->wear_z_mm);
+                json_number(j, "nose_radius_mm", tool_data->nose_radius_mm);
+                json_number(j, "orientation", static_cast<uint64_t>(tool_data->orientation));
+                j.end_object();
+            }
+            j.end_array();
+            j.end_object();
+
             j.begin_member_object("turret");
             json_bool(j, "configured", turret.configured);
             json_number(j, "station_count", static_cast<uint64_t>(turret.station_count));
@@ -543,9 +606,13 @@ namespace WebUI {
             j.end_object();
 
             j.begin_array("conditions");
-            const bool alarm_state = sys.state() == State::Alarm || sys.state() == State::Critical || sys.state() == State::ConfigAlarm;
             if (alarm_state) {
-                json_condition(j, "FAULT", "CONTROLLER", "SYSTEM_ALARM", alarm_name == nullptr ? "Unknown controller alarm" : alarm_name);
+                json_condition(
+                    j,
+                    alarm_native_severity(lastAlarm),
+                    alarm_source(lastAlarm),
+                    alarm_native_code(lastAlarm),
+                    alarm_name == nullptr ? "Unknown controller alarm" : alarm_name);
             }
             if (!estop_configured) {
                 json_condition(j, "UNAVAILABLE", "SAFETY", "ESTOP_FEEDBACK_UNAVAILABLE", "Physical E-stop removes power but has no controller feedback input");

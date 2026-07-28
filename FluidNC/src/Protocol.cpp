@@ -10,6 +10,8 @@
 #include "Protocol.h"
 #include "Event.h"
 
+#include <algorithm>
+
 #include "Machine/MachineConfig.h"
 #include "Machine/Homing.h"
 #include "Report.h"               // report_feedback_message
@@ -25,6 +27,33 @@
 volatile ExecAlarm lastAlarm;  // The most recent alarm code
 
 volatile const char* unwind_cause = nullptr;
+
+namespace {
+    portMUX_TYPE alarmTelemetryMux = portMUX_INITIALIZER_UNLOCKED;
+
+    AlarmTelemetryRecord alarmTelemetry[AlarmTelemetryCapacity] = {};
+    size_t               alarmTelemetryCount                    = 0;
+    size_t               alarmTelemetryNext                     = 0;
+    uint32_t             alarmTelemetrySequence                 = 0;
+
+    void record_alarm_telemetry(ExecAlarm alarm) {
+        portENTER_CRITICAL(&alarmTelemetryMux);
+        ++alarmTelemetrySequence;
+        if (alarmTelemetrySequence == 0) {
+            ++alarmTelemetrySequence;
+        }
+        alarmTelemetry[alarmTelemetryNext] = {
+            alarmTelemetrySequence,
+            millis(),
+            alarm,
+        };
+        alarmTelemetryNext = (alarmTelemetryNext + 1) % AlarmTelemetryCapacity;
+        if (alarmTelemetryCount < AlarmTelemetryCapacity) {
+            ++alarmTelemetryCount;
+        }
+        portEXIT_CRITICAL(&alarmTelemetryMux);
+    }
+}
 
 const std::map<ExecAlarm, const char*> AlarmNames = {
     { ExecAlarm::None, "None" },
@@ -52,6 +81,97 @@ const std::map<ExecAlarm, const char*> AlarmNames = {
 const char* alarmString(ExecAlarm alarmNumber) {
     auto it = AlarmNames.find(alarmNumber);
     return it == AlarmNames.end() ? NULL : it->second;
+}
+
+size_t copy_alarm_telemetry(AlarmTelemetryRecord* destination, size_t capacity) {
+    if (destination == nullptr || capacity == 0) {
+        return 0;
+    }
+
+    portENTER_CRITICAL(&alarmTelemetryMux);
+    const size_t count = std::min(alarmTelemetryCount, capacity);
+    const size_t oldest =
+        (alarmTelemetryNext + AlarmTelemetryCapacity - alarmTelemetryCount) % AlarmTelemetryCapacity;
+    const size_t skip = alarmTelemetryCount - count;
+    for (size_t index = 0; index < count; ++index) {
+        destination[index] =
+            alarmTelemetry[(oldest + skip + index) % AlarmTelemetryCapacity];
+    }
+    portEXIT_CRITICAL(&alarmTelemetryMux);
+    return count;
+}
+
+const char* alarm_native_code(ExecAlarm alarm) {
+    switch (alarm) {
+        case ExecAlarm::HardLimit: return "FLUIDNC_ALARM_01";
+        case ExecAlarm::SoftLimit: return "FLUIDNC_ALARM_02";
+        case ExecAlarm::AbortCycle: return "FLUIDNC_ALARM_03";
+        case ExecAlarm::ProbeFailInitial: return "FLUIDNC_ALARM_04";
+        case ExecAlarm::ProbeFailContact: return "FLUIDNC_ALARM_05";
+        case ExecAlarm::HomingFailReset: return "FLUIDNC_ALARM_06";
+        case ExecAlarm::HomingFailDoor: return "FLUIDNC_ALARM_07";
+        case ExecAlarm::HomingFailPulloff: return "FLUIDNC_ALARM_08";
+        case ExecAlarm::HomingFailApproach: return "FLUIDNC_ALARM_09";
+        case ExecAlarm::SpindleControl: return "FLUIDNC_ALARM_10";
+        case ExecAlarm::StartupPin: return "FLUIDNC_ALARM_11";
+        case ExecAlarm::HomingAmbiguousSwitch: return "FLUIDNC_ALARM_12";
+        case ExecAlarm::HardStop: return "FLUIDNC_ALARM_13";
+        case ExecAlarm::Unhomed: return "FLUIDNC_ALARM_14";
+        case ExecAlarm::Init: return "FLUIDNC_ALARM_15";
+        case ExecAlarm::ExpanderReset: return "FLUIDNC_ALARM_16";
+        case ExecAlarm::GCodeError: return "FLUIDNC_ALARM_17";
+        case ExecAlarm::ProbeHardLimit: return "FLUIDNC_ALARM_18";
+        case ExecAlarm::LatheSync: return "FLUIDNC_ALARM_19";
+        case ExecAlarm::None: return "FLUIDNC_ALARM_00";
+    }
+    return "FLUIDNC_ALARM_UNKNOWN";
+}
+
+const char* alarm_source(ExecAlarm alarm) {
+    switch (alarm) {
+        case ExecAlarm::HardLimit:
+        case ExecAlarm::SoftLimit:
+        case ExecAlarm::StartupPin:
+        case ExecAlarm::HomingAmbiguousSwitch:
+        case ExecAlarm::HardStop:
+            return "LIMIT";
+        case ExecAlarm::ProbeFailInitial:
+        case ExecAlarm::ProbeFailContact:
+        case ExecAlarm::ProbeHardLimit:
+            return "PROBE";
+        case ExecAlarm::HomingFailReset:
+        case ExecAlarm::HomingFailDoor:
+        case ExecAlarm::HomingFailPulloff:
+        case ExecAlarm::HomingFailApproach:
+        case ExecAlarm::Unhomed:
+            return "MOTION";
+        case ExecAlarm::SpindleControl:
+        case ExecAlarm::LatheSync:
+            return "SPINDLE";
+        case ExecAlarm::GCodeError:
+            return "PROGRAM";
+        case ExecAlarm::AbortCycle:
+        case ExecAlarm::Init:
+        case ExecAlarm::ExpanderReset:
+        case ExecAlarm::None:
+            return "CONTROLLER";
+    }
+    return "CONTROLLER";
+}
+
+const char* alarm_native_severity(ExecAlarm alarm) {
+    switch (alarm) {
+        case ExecAlarm::HardLimit:
+        case ExecAlarm::SoftLimit:
+        case ExecAlarm::HardStop:
+        case ExecAlarm::ExpanderReset:
+        case ExecAlarm::LatheSync:
+            return "CRITICAL";
+        case ExecAlarm::None:
+            return "NORMAL";
+        default:
+            return "FAULT";
+    }
 }
 
 static volatile bool rtSafetyDoor;
@@ -445,6 +565,7 @@ static void protocol_do_start() {
 
 static void protocol_do_alarm(void* alarmVoid) {
     lastAlarm = (ExecAlarm)((int)(intptr_t)alarmVoid);
+    record_alarm_telemetry(lastAlarm);
     if (spindle->_off_on_alarm) {
         spindle->stop();
     }
