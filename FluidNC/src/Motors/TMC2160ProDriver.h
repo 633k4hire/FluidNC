@@ -13,9 +13,9 @@ const float TMC2160_RSENSE_DEFAULT = 0.050f;  // Ref only, not used
 
 namespace MotorDrivers {
 
-    class TMC2160Driver : public TMC5160ProDriver {
+    class TMC2160ProDriver : public TMC5160ProDriver {
     public:
-        TMC2160Driver(const char* name) : TMC5160ProDriver(name) {}
+        TMC2160ProDriver(const char* name) : TMC5160ProDriver(name) {}
 
     private:
     };

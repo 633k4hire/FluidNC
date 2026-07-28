@@ -9,6 +9,6 @@ namespace MotorDrivers {
 
     // Configuration registration
     namespace {
-        MotorFactory::InstanceBuilder<TMC2160Driver> registration("tmc_2160Pro");
+        MotorFactory::InstanceBuilder<TMC2160ProDriver> registration("tmc_2160Pro");
     }
 }

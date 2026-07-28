@@ -63,7 +63,7 @@ namespace {
         size_t                        expected = 0;
     };
 
-    struct FirmwareDeploymentBody {
+    struct FirmwareRequestBody {
         std::vector<uint8_t> bytes;
         size_t               expected = 0;
         bool                 overflow = false;
@@ -182,7 +182,7 @@ namespace {
         preferences.end();
     }
 
-    std::string bodyString(const FirmwareDeploymentBody* body) {
+    std::string bodyString(const FirmwareRequestBody* body) {
         if (!body || body->bytes.empty()) return {};
         return std::string(reinterpret_cast<const char*>(body->bytes.data()), body->bytes.size());
     }
@@ -1319,9 +1319,7 @@ namespace WebUI {
 
         if (hasFormValue("NEWPASSWORD")) {
             String newPassword = formValue("NEWPASSWORD");
-            char   passwordBuffer[MAX_LOCAL_PASSWORD_LENGTH + 1] = {};
-            newPassword.toCharArray(passwordBuffer, sizeof(passwordBuffer));
-            if (!authentication_set_password(level == AuthenticationLevel::LEVEL_ADMIN, passwordBuffer)) {
+            if (!authentication_set_password(level == AuthenticationLevel::LEVEL_ADMIN, newPassword.c_str())) {
                 sendLogin(422, "Error: Password cannot contain spaces", "guest", "");
                 return;
             }
@@ -1869,12 +1867,12 @@ namespace WebUI {
     void WebUI_Server::FirmwareDeploymentBody(
         AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
         if (!request->_tempObject) {
-            auto* body          = new FirmwareDeploymentBody();
+            auto* body          = new FirmwareRequestBody();
             body->expected      = total;
             body->overflow      = total > FirmwareBodyLimit;
             request->_tempObject = body;
         }
-        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        auto* body = static_cast<FirmwareRequestBody*>(request->_tempObject);
         if (body->overflow || total != body->expected || index != body->bytes.size() ||
             body->bytes.size() + len > FirmwareBodyLimit) {
             body->overflow = true;
@@ -1884,7 +1882,7 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleFirmwareDeploymentRequest(AsyncWebServerRequest* request) {
-        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        auto* body = static_cast<FirmwareRequestBody*>(request->_tempObject);
         auto cleanup = [&]() {
             delete body;
             request->_tempObject = nullptr;
@@ -2150,12 +2148,12 @@ namespace WebUI {
     void WebUI_Server::LatheApiBody(
         AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
         if (!request->_tempObject) {
-            auto* body           = new FirmwareDeploymentBody();
+            auto* body           = new FirmwareRequestBody();
             body->expected       = total;
             body->overflow       = total > 1024;
             request->_tempObject = body;
         }
-        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        auto* body = static_cast<FirmwareRequestBody*>(request->_tempObject);
         if (body->overflow || total != body->expected || index != body->bytes.size() || body->bytes.size() + len > 1024) {
             body->overflow = true;
             return;
@@ -2164,7 +2162,7 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleLatheApiRequest(AsyncWebServerRequest* request) {
-        auto* body = static_cast<FirmwareDeploymentBody*>(request->_tempObject);
+        auto* body = static_cast<FirmwareRequestBody*>(request->_tempObject);
         auto cleanup = [&]() {
             delete body;
             request->_tempObject = nullptr;
