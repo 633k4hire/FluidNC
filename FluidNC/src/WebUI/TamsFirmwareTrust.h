@@ -7,16 +7,24 @@
 #include <cstring>
 
 #ifndef TAMS_FW_PRODUCTION_KEY_ID
-#    define TAMS_FW_PRODUCTION_KEY_ID ""
+#    define TAMS_FW_PRODUCTION_KEY_ID "xza-production-p256-f6a017cc2049"
 #endif
 #ifndef TAMS_FW_PRODUCTION_KEY_PEM
-#    define TAMS_FW_PRODUCTION_KEY_PEM ""
+#    define TAMS_FW_PRODUCTION_KEY_PEM                                                                                  \
+        "-----BEGIN PUBLIC KEY-----\n"                                                                                  \
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEC5k1yIpyZuXQWWIDSFGCHYGErSyn\n"                                             \
+        "6rlq66iEKuZYPcVLby3wcl8BL298cK73LgyQ0wmHKcf8TF6dIyP9V2paVA==\n"                                                 \
+        "-----END PUBLIC KEY-----\n"
 #endif
 #ifndef TAMS_FW_RECOVERY_KEY_ID
-#    define TAMS_FW_RECOVERY_KEY_ID ""
+#    define TAMS_FW_RECOVERY_KEY_ID "xza-recovery-p256-dae6bdeea1af"
 #endif
 #ifndef TAMS_FW_RECOVERY_KEY_PEM
-#    define TAMS_FW_RECOVERY_KEY_PEM ""
+#    define TAMS_FW_RECOVERY_KEY_PEM                                                                                    \
+        "-----BEGIN PUBLIC KEY-----\n"                                                                                  \
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEq2VdhtnfOqCy8LTPiVGrYrWZngrN\n"                                             \
+        "1rMpm/XUxjVS64rgV/XHVMRulVWg3EEUrSkKMvVLcfJv3xbgGRMCqmjZFw==\n"                                                 \
+        "-----END PUBLIC KEY-----\n"
 #endif
 
 namespace TamsFirmware {
