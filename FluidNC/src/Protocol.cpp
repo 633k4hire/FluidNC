@@ -15,6 +15,7 @@
 #include "Event.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "Machine/MachineConfig.h"
 #include "Machine/Homing.h"
@@ -392,7 +393,18 @@ void protocol_main_loop() {
             } else
 #endif
             {
-                status_code = execute_line(activeLine, *out_channel, AuthenticationLevel::LEVEL_GUEST);
+                // The lathe's dedicated UART1 is the physically wired M5Dial
+                // operator channel. It must be able to read ESP421, load
+                // macros, and execute the same guarded machine actions as the
+                // pendant UI. Network and USB channels remain guest by
+                // default and retain their normal authentication gates.
+                const bool trustedLathePendant =
+                    Lathe::enabled() && strcmp(activeChannel->name(), "uart_channel1") == 0;
+                status_code = execute_line(
+                    activeLine,
+                    *out_channel,
+                    trustedLathePendant ? AuthenticationLevel::LEVEL_ADMIN
+                                        : AuthenticationLevel::LEVEL_GUEST);
             }
             LatheDiagnostics::recordLine(activeChannel->name(), activeLine, status_code);
 
