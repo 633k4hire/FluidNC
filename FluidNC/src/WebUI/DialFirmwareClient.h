@@ -17,6 +17,7 @@ namespace WebUI {
         std::string version;
         std::string health;
         std::string fluidNcLinkState;
+        std::string pairTag;
         std::string lastError;
         uint32_t    releaseCounter = 0;
     };
@@ -70,6 +71,10 @@ namespace WebUI {
         bool confirmPairing(const std::string& comparisonCode);
         bool pollPairing();
         void cancelPairing();
+        bool pairFromUart(const std::string& deviceId,
+                          const std::string& fingerprint,
+                          const std::string& deviceNonce,
+                          std::string& response);
 
         bool beginDeployment(const TamsFirmware::ValidationResult& package, const std::string& deploymentId);
         bool relayChunk(uint32_t offset, const uint8_t* data, size_t length);

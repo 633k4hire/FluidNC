@@ -22,6 +22,7 @@
 #include "MotionControl.h"
 #include "Planner.h"
 #include "Stepper.h"
+#include "DialFirmwareClient.h"
 #include "Machine/Homing.h"
 #include "Spindles/Spindle.h"
 #include "ToolChangers/maijker_turret.h"
@@ -495,6 +496,7 @@ namespace WebUI {
             j.member("state", spindle_state_name(spindle_state));
             json_number(j, "programmed_s", gc_state.spindle_speed);
             json_number(j, "commanded_rpm", gc_state.lathe_commanded_rpm);
+            json_number(j, "maximum_rpm", Lathe::max_css_rpm());
             json_nullable_number(j, "measured_rpm", feedback.has_measured_rpm, feedback.measured_rpm);
             j.member(
                 "speed_mode",
@@ -772,6 +774,28 @@ namespace WebUI {
             return contact ? Error::Ok : Error::GcodeInvalidTarget;
         }
 
+        static Error pairM5DialFromUart(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP428
+            if (strncmp(out.name(), "uart_channel", strlen("uart_channel")) != 0) {
+                send_json_command_response(out, 428, false, "physical UART channel required");
+                return Error::AuthenticationFailed;
+            }
+
+            std::string deviceId;
+            std::string fingerprint;
+            std::string deviceNonce;
+            std::string response;
+            if (!get_param(parameter, "D=", deviceId) ||
+                !get_param(parameter, "F=", fingerprint) ||
+                !get_param(parameter, "N=", deviceNonce) ||
+                !DialFirmwareClient::instance().pairFromUart(
+                    deviceId, fingerprint, deviceNonce, response)) {
+                send_json_command_response(out, 428, false, "invalid UART pairing bootstrap");
+                return Error::InvalidValue;
+            }
+            send_json_command_response(out, 428, true, response);
+            return Error::Ok;
+        }
+
         static Error showLatheStatusJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP421
             JSONencoder j(&out);
             j.begin();
@@ -1045,6 +1069,8 @@ namespace WebUI {
             new WebCommand("MODE=IDLE|C_POSITIONING|SPINDLE", WEBCMD, WA, "ESP426", "Lathe/SharedChuckMode", selectSharedChuckModeJSON, anyState);
             new WebCommand(
                 "PROBE,AXIS=X|Z,DISTANCE=signed_mm,FEED=mm_per_min", WEBCMD, WA, "ESP427", "Lathe/BoundedProbe", runBoundedProbeJSON, anyState);
+            new WebCommand(
+                "D=device_id F=identity_fingerprint N=device_nonce", WEBCMD, WG, "ESP428", "System/M5DialUartPair", pairM5DialFromUart, anyState);
             new WebCommand("T=tool [GX=x] [GZ=z] [WX=x] [WZ=z] [NR=r] [O=orientation]", WEBCMD, WA, "ESP422", "Lathe/ToolSet", setLatheToolJSON, anyState);
             new WebCommand("T=tool [MX=x RX=x MODE=diameter|radius] [MZ=z RZ=z]", WEBCMD, WA, "ESP423", "Lathe/TouchOff", touchOffLatheToolJSON, anyState);
             new WebCommand("HOME=1", WEBCMD, WA, "ESP424", "Lathe/TurretHome", homeMaijkerTurretJSON, anyState);

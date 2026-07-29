@@ -16,7 +16,8 @@ namespace WebUI {
     namespace {
         constexpr char Namespace[] = "tamsdial";
         constexpr char PairLabel[] = "tams-fluiddial-http-pair-v1";
-        constexpr uint32_t HttpTimeoutMs = 5000;
+        constexpr char UartPairLabel[] = "tams-fluiddial-uart-pair-v1";
+        constexpr uint32_t HttpTimeoutMs = 15000;
 
         struct HttpResponse {
             int         status = 0;
@@ -84,6 +85,13 @@ namespace WebUI {
                             reinterpret_cast<const uint8_t*>(value.data()),
                             value.size(),
                             output);
+        }
+        std::string pairDiagnosticTag(const uint8_t key[32]) {
+            uint8_t digest[32];
+            hmac(key, "tams-uart-pair-diagnostic-v1", digest);
+            std::string value = hex(digest, 8);
+            secureZero(digest, sizeof(digest));
+            return value;
         }
         bool makeKeypair(uint8_t privateKey[32], uint8_t publicKey[65]) {
             mbedtls_ecp_group group;
@@ -157,8 +165,11 @@ namespace WebUI {
                                  const std::string& headers = {}) {
             HttpResponse result;
             WiFiClient client;
-            client.setTimeout(HttpTimeoutMs / 1000);
-            if (!client.connect(ip.c_str(), 80)) return result;
+            // Arduino Stream::setTimeout() is milliseconds. The previous
+            // division reduced a 5-second HTTP budget to 5 ms, so fragmented
+            // headers were mistaken for response-body bytes.
+            client.setTimeout(HttpTimeoutMs);
+            if (!client.connect(ip.c_str(), 80, HttpTimeoutMs)) return result;
             std::string request = std::string(method) + " " + path + " HTTP/1.1\r\nHost: " + ip +
                                   "\r\nConnection: close\r\nUser-Agent: FluidNC-Maijker-OTA\r\n";
             if (!contentType.empty()) request += "Content-Type: " + contentType + "\r\n";
@@ -172,7 +183,10 @@ namespace WebUI {
             size_t first = statusLine.find(' ');
             if (first != std::string::npos) result.status = atoi(statusLine.c_str() + first + 1);
             int contentLength = -1;
-            while (client.connected()) {
+            // A peer may close immediately after sending its response while
+            // header bytes remain buffered locally. Drain those bytes instead
+            // of mistaking the buffered headers for response-body content.
+            while (client.connected() || client.available()) {
                 std::string line = client.readStringUntil('\n').c_str();
                 if (line == "\r" || line.empty()) break;
                 if (line.rfind("Content-Length:", 0) == 0) contentLength = atoi(line.c_str() + 15);
@@ -230,6 +244,7 @@ namespace WebUI {
             _state.fingerprint = preferences.getString("dial_fp", "").c_str();
             _state.ip = preferences.getString("dial_ip", "").c_str();
             _state.version = preferences.getString("dial_ver", "").c_str();
+            _state.pairTag = pairDiagnosticTag(_pairSecret);
         }
         preferences.end();
         return _controllerPublic[0] == 0x04;
@@ -247,6 +262,7 @@ namespace WebUI {
         preferences.end();
         memcpy(_pairSecret, _pendingSecret, sizeof(_pairSecret));
         _state.paired = true;
+        _state.pairTag = pairDiagnosticTag(_pairSecret);
         _state.deviceId = _pendingDeviceId;
         _state.fingerprint = _pendingFingerprint;
         _state.ip = _pendingIp;
@@ -288,7 +304,9 @@ namespace WebUI {
             if (!refreshHealth()) {
                 _state.ip = oldIp;
                 _state.online = false;
-                _state.lastError = "M5Dial address changed without identity proof";
+                if (_state.lastError.empty()) {
+                    _state.lastError = "M5Dial address changed without identity proof";
+                }
                 _lastDiscoveryOk = false;
                 return false;
             }
@@ -383,6 +401,74 @@ namespace WebUI {
         return false;
     }
 
+    bool DialFirmwareClient::pairFromUart(const std::string& deviceId,
+                                          const std::string& fingerprint,
+                                          const std::string& deviceNonce,
+                                          std::string& response) {
+        response.clear();
+        uint8_t fingerprintBytes[32];
+        uint8_t deviceNonceBytes[16];
+        if (!_initialized ||
+            deviceId.rfind("fluiddial-", 0) != 0 ||
+            deviceId.size() != 26 ||
+            !unhex(fingerprint, fingerprintBytes, sizeof(fingerprintBytes)) ||
+            !unhex(deviceNonce, deviceNonceBytes, sizeof(deviceNonceBytes))) {
+            secureZero(fingerprintBytes, sizeof(fingerprintBytes));
+            secureZero(deviceNonceBytes, sizeof(deviceNonceBytes));
+            return false;
+        }
+
+        const std::string nonceContext =
+            std::string("tams-fluiddial-uart-controller-nonce-v1\n") +
+            deviceId + "\n" + fingerprint + "\n" + deviceNonce;
+        uint8_t controllerNonceDigest[32];
+        hmac(_controllerPrivate, nonceContext, controllerNonceDigest);
+        uint8_t controllerNonceBytes[16];
+        memcpy(controllerNonceBytes, controllerNonceDigest, sizeof(controllerNonceBytes));
+        const std::string controllerNonce = hex(controllerNonceBytes, sizeof(controllerNonceBytes));
+        const std::string transcript =
+            std::string(UartPairLabel) + "\n" + _controllerDeviceId + "\n" +
+            _controllerFingerprint + "\n" + deviceId + "\n" + fingerprint +
+            "\n" + deviceNonce + "\n" + controllerNonce;
+        uint8_t derivedSecret[32];
+        mbedtls_sha256_ret(
+            reinterpret_cast<const uint8_t*>(transcript.data()),
+            transcript.size(),
+            derivedSecret,
+            0);
+
+        Preferences preferences;
+        preferences.begin(Namespace, false);
+        preferences.putBytes("secret", derivedSecret, sizeof(derivedSecret));
+        preferences.putString("dial_id", deviceId.c_str());
+        preferences.putString("dial_fp", fingerprint.c_str());
+        preferences.putBool("paired", true);
+        preferences.end();
+
+        memcpy(_pairSecret, derivedSecret, sizeof(_pairSecret));
+        _state.paired = true;
+        _state.pairTag = pairDiagnosticTag(_pairSecret);
+        _state.online = false;
+        _state.ambiguous = false;
+        _state.deviceId = deviceId;
+        _state.fingerprint = fingerprint;
+        _state.version.clear();
+        _state.health.clear();
+        _state.fluidNcLinkState.clear();
+        _state.lastError.clear();
+        _lastDiscoveryAt = 0;
+        _lastDiscoveryOk = false;
+
+        response = "CID=" + _controllerDeviceId + " CF=" +
+                   _controllerFingerprint + " CN=" + controllerNonce;
+        secureZero(fingerprintBytes, sizeof(fingerprintBytes));
+        secureZero(deviceNonceBytes, sizeof(deviceNonceBytes));
+        secureZero(controllerNonceDigest, sizeof(controllerNonceDigest));
+        secureZero(controllerNonceBytes, sizeof(controllerNonceBytes));
+        secureZero(derivedSecret, sizeof(derivedSecret));
+        return true;
+    }
+
     void DialFirmwareClient::cancelPairing() {
         secureZero(_pendingPrivate, sizeof(_pendingPrivate));
         secureZero(_pendingSecret, sizeof(_pendingSecret));
@@ -455,7 +541,14 @@ namespace WebUI {
         bool responseAuthenticated = constantHexEquals(response.responseAuth, expectedResponseAuth);
         secureZero(expectedResponseAuth, sizeof(expectedResponseAuth));
         if (!responseAuthenticated) {
-            _state.lastError = "M5Dial response authentication failed";
+            if (response.responseAuth.empty()) {
+                _state.lastError = "M5Dial HTTP " + std::to_string(response.status) +
+                                   " omitted response proof: " + response.body;
+            } else {
+                _state.lastError = "M5Dial response proof mismatch (HTTP " +
+                                   std::to_string(response.status) + ", body bytes " +
+                                   std::to_string(response.body.size()) + ")";
+            }
             return false;
         }
         if (response.status < 200 || response.status >= 300) {
@@ -466,12 +559,24 @@ namespace WebUI {
     }
 
     bool DialFirmwareClient::exactTargetOnline() {
+        const bool recentAuthenticatedTarget =
+            _lastDiscoveryOk && _lastDiscoveryAt &&
+            static_cast<uint32_t>(millis() - _lastDiscoveryAt) < 30000U &&
+            _state.paired && !_state.ambiguous && _state.online && !_state.ip.empty();
+        if (recentAuthenticatedTarget) return true;
         if (!discover(true) || !_state.paired || _state.ambiguous) return false;
         return _state.online;
     }
 
     bool DialFirmwareClient::beginDeployment(const TamsFirmware::ValidationResult& package, const std::string& deploymentId) {
-        if (_deployment.active || !package.valid() || !exactTargetOnline()) return false;
+        // The deployment handler has just verified the recent, exact paired
+        // target. Do not run mDNS and health discovery again here: the begin
+        // request itself obtains a fresh authenticated challenge, and a hidden
+        // rediscovery can race the old M5 firmware while it opens its OTA slot.
+        if (_deployment.active || !package.valid() || !_state.paired ||
+            _state.ambiguous || _state.ip.empty()) {
+            return false;
+        }
         _deployment = {};
         _deployment.active = true;
         _deployment.stage = 1;
@@ -635,7 +740,8 @@ namespace WebUI {
         if (!_deployment.active && !_deployment.terminal && _deployment.stage >= 4) {
             _deployment.stage = 6;
         }
-        if (!_deployment.toVersion.empty() && _state.version == _deployment.toVersion &&
+        if (_deployment.toReleaseCounter &&
+            _state.releaseCounter == _deployment.toReleaseCounter &&
             _state.health == "healthy" && lastDeploymentId == _deployment.deploymentId &&
             lastResult == "success") {
             _deployment.stage = 8;
@@ -728,10 +834,11 @@ namespace WebUI {
                ",\"device_id\":\"" + jsonEscape(_state.deviceId) + "\",\"fingerprint\":\"" +
                jsonEscape(_state.fingerprint) + "\",\"ip\":\"" + jsonEscape(_state.ip) +
                "\",\"hardware_role\":\"m5dial_hmi\",\"version\":\"" + jsonEscape(_state.version) +
-               "\",\"release_counter\":" + std::to_string(_state.releaseCounter) +
-               ",\"health\":\"" + jsonEscape(_state.health) + "\",\"fluidnc_link_state\":\"" +
-               jsonEscape(_state.fluidNcLinkState) + "\",\"error\":\"" +
-               jsonEscape(_state.lastError) + "\"}";
+                "\",\"release_counter\":" + std::to_string(_state.releaseCounter) +
+                ",\"health\":\"" + jsonEscape(_state.health) + "\",\"fluidnc_link_state\":\"" +
+                jsonEscape(_state.fluidNcLinkState) + "\",\"pair_tag\":\"" +
+                jsonEscape(_state.pairTag) + "\",\"error\":\"" +
+                jsonEscape(_state.lastError) + "\"}";
     }
 
     std::string DialFirmwareClient::deploymentJson() const {

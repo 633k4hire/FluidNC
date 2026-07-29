@@ -21,7 +21,8 @@ uart_channel1:
 
 stepping:
   engine: I2S_STATIC
-  idle_ms: 0
+  # Hold the axes after motion so short jogs do not chatter the driver enables.
+  idle_ms: 3000
   pulse_us: 4
   dir_delay_us: 1
   disable_delay_us: 0
@@ -30,8 +31,9 @@ axes:
   shared_stepper_disable_pin: i2so.0
   x:
     steps_per_mm: 320
-    max_rate_mm_per_min: 5000
-    acceleration_mm_per_sec2: 500
+    # Conservative jeweler-lathe commissioning profile.
+    max_rate_mm_per_min: 600
+    acceleration_mm_per_sec2: 25
     max_travel_mm: 60
     soft_limits: true
     homing:
@@ -53,8 +55,9 @@ axes:
 
   z:
     steps_per_mm: 320
-    max_rate_mm_per_min: 5000
-    acceleration_mm_per_sec2: 500
+    # Conservative jeweler-lathe commissioning profile.
+    max_rate_mm_per_min: 600
+    acceleration_mm_per_sec2: 25
     max_travel_mm: 90
     soft_limits: true
     homing:
@@ -167,7 +170,9 @@ HBridge:
   # This is the first and only spindle definition. tool_num selects among
   # multiple spindles; it is not the turret station count.
   tool_num: 0
-  speed_map: 0=0.000% 2000=100.000%
+  # Until closed-loop spindle feedback is commissioned, cap output to the
+  # estimated 25% duty that corresponds to 500 RPM on the existing 2000 RPM map.
+  speed_map: 0=0.000% 500=25.000%
   off_on_alarm: true
   atc: maijker_5_station_turret
 
@@ -202,7 +207,7 @@ lathe:
   enable_feed_per_rev: true
   enable_threading: false
   min_css_diameter_mm: 1.000
-  max_css_rpm: 2000.000
+  max_css_rpm: 500.000
   x_axis: 0
   z_axis: 2
   # The step-driven C axis and HBridge spindle turn the same physical chuck.

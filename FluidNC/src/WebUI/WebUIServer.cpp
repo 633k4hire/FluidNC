@@ -493,8 +493,10 @@ namespace {
             reason = "another firmware deployment owns the maintenance lock";
             return false;
         }
-        if (!state_is(State::Idle)) {
-            reason = "machine state is not Idle";
+        const bool idle          = state_is(State::Idle);
+        const bool safelyUnhomed = state_is(State::Alarm) && lastAlarm == ExecAlarm::Unhomed;
+        if (!idle && !safelyUnhomed) {
+            reason = "machine is neither Idle nor safely unhomed";
             return false;
         }
         if (plan_get_current_block() != nullptr) {
@@ -514,7 +516,8 @@ namespace {
             reason = "turret action is pending";
             return false;
         }
-        reason = "Idle, planner empty, spindle off, shared chuck idle, turret idle";
+        reason = safelyUnhomed ? "Unhomed, planner empty, spindle off, shared chuck idle, turret idle"
+                               : "Idle, planner empty, spindle off, shared chuck idle, turret idle";
         return true;
     }
 
@@ -1918,7 +1921,9 @@ namespace WebUI {
             return;
         }
         auto& dial = DialFirmwareClient::instance();
-        if (dial.discover() && dial.state().paired) dial.refreshHealth();
+        // discover() already authenticates health for a paired device. Do not
+        // repeat the challenge/health exchange in the same request.
+        dial.discover();
         std::string safetyReason;
         bool        safe     = firmwareSafety(safetyReason);
         const auto* inactive = esp_ota_get_next_update_partition(nullptr);
@@ -1984,7 +1989,13 @@ namespace WebUI {
         bool        recoveryConfirmationRequired = false;
         if (result.valid()) {
             if (target == "dial") {
-                targetExact = dial.discover() && dial.state().paired && !dial.state().ambiguous && dial.refreshHealth();
+                // The deployment client reads /firmware/devices immediately
+                // before uploading this package. Signature validation must
+                // remain local; repeating mDNS plus an authenticated health
+                // exchange here races the old M5 Wi-Fi stack after a large
+                // package upload. Deployment start obtains a new challenge.
+                targetExact = dial.state().paired && !dial.state().ambiguous &&
+                              !dial.state().ip.empty();
                 recoveryConfirmationRequired = result.keyRecovery && result.manifest.recovery &&
                                                result.manifest.allowDowngrade &&
                                                result.manifest.releaseCounter <= dial.state().releaseCounter;
@@ -2258,7 +2269,8 @@ namespace WebUI {
                              std::to_string(FirmwareRelayChunkSize) + "}");
                 return;
             }
-            if (!dial.discover(true) || !dial.state().paired || dial.state().ambiguous || !dial.refreshHealth()) {
+            const auto& dialState = dial.state();
+            if (!dialState.paired || dialState.ambiguous || dialState.ip.empty()) {
                 request->send(409, "application/json", "{\"error\":\"the exact paired M5Dial is not authenticated and online\"}");
                 return;
             }
@@ -2436,7 +2448,7 @@ namespace WebUI {
                 request->send(409, "application/json", "{\"error\":\"the active configuration is not a confirmed lathe\"}");
                 return;
             }
-            synchronousCommand(request, "[ESP425]", true, AuthenticationLevel::LEVEL_ADMIN, true);
+            synchronousCommand(request, "[ESP425]", false, AuthenticationLevel::LEVEL_ADMIN, true);
             return;
         }
         if (request->method() != HTTP_POST) {
@@ -2528,9 +2540,11 @@ namespace WebUI {
         } else if (url == "/api/v1/lathe/spindle") {
             std::string direction = bodyJsonString(json, "direction");
             double      rpm       = 0;
-            if (!bodyJsonNumber(json, "rpm", rpm) || rpm <= 0.0 || rpm > 10000.0 ||
+            const double configuredMaxRpm = Lathe::max_css_rpm();
+            if (!bodyJsonNumber(json, "rpm", rpm) || rpm <= 0.0 || configuredMaxRpm <= 0.0 ||
+                rpm > configuredMaxRpm ||
                 (direction != "cw" && direction != "ccw")) {
-                request->send(422, "application/json", "{\"error\":\"invalid spindle direction or RPM\"}");
+                request->send(422, "application/json", "{\"error\":\"spindle RPM exceeds the configured lathe limit\"}");
                 return;
             }
             if (Lathe::shared_chuck_enabled() && Lathe::shared_chuck_mode() != Lathe::SharedChuckMode::Spindle) {

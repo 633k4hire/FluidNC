@@ -182,9 +182,13 @@ function renderTelemetry(data){
   $("#spindle-motion-panel").hidden=cMode;$("#c-motion-panel").hidden=!cMode;
 
   const commanded=Number(spindle.commanded_rpm)||0,measured=spindle.measured_rpm;
+  const maximumRpm=Math.max(1,Number(spindle.maximum_rpm)||500);
+  $("#spindle-rpm").max=String(maximumRpm);
+  $("#spindle-slider").max=String(maximumRpm);
+  if(Number($("#spindle-rpm").value)>maximumRpm)$("#spindle-rpm").value=String(maximumRpm);
   $("#gauge-rpm").textContent=Math.round(measured??commanded);
   $("#gauge-direction").textContent=spindle.state||"OFF";
-  $("#rpm-gauge").style.setProperty("--rpm-pct",`${Math.min(75,Math.max(0,commanded/10000*75))}%`);
+  $("#rpm-gauge").style.setProperty("--rpm-pct",`${Math.min(75,Math.max(0,commanded/maximumRpm*75))}%`);
   $("#control-commanded-rpm").textContent=Math.round(commanded);
   $("#control-measured-rpm").textContent=measured===null?"—":Math.round(measured);
   $("#control-encoder-state").textContent=encoderReady?encoder.fault?"Fault":encoder.stale?"Stale":"Ready":"Not commissioned";
@@ -249,7 +253,11 @@ $("#jog-increments").onclick=event=>{
   state.jogIncrement=Number(button.dataset.increment);
   $$("#jog-increments button").forEach(item=>item.classList.toggle("active",item===button));
 };
-$("#spindle-rpm").oninput=event=>{$("#spindle-slider").value=Math.min(5000,Number(event.target.value)||0);};
+$("#spindle-rpm").oninput=event=>{
+  const maximum=Number(event.target.max)||500;
+  const bounded=Math.min(maximum,Math.max(0,Number(event.target.value)||0));
+  event.target.value=String(bounded);$("#spindle-slider").value=String(bounded);
+};
 $("#spindle-slider").oninput=event=>{$("#spindle-rpm").value=event.target.value;};
 $("#set-physical-station").onclick=()=>typedAction("turret/confirm",{tool:Number($("#physical-station").value),visual_inspection:true});
 
