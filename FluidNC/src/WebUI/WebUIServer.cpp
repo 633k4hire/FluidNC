@@ -831,6 +831,7 @@ namespace WebUI {
         _headerFilter->keep("If-None-Match");
         _headerFilter->keep("User-Agent");
         _headerFilter->keep("X-CSRF-Token");
+        _headerFilter->keep("X-TAMS-Control-Token");
         _headerFilter->keep("X-TAMS-Target");
 
         // WebDAV needs these
