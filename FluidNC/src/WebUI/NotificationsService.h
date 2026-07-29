@@ -14,9 +14,6 @@ namespace WebUI {
         NotificationsService(const char* name) : Module(name) {
             _started          = false;
             _notificationType = 0;
-            _token1           = "";
-            _token2           = "";
-            _settings         = "";
         }
 
         static bool        sendMSG(const char* title, const char* message);
