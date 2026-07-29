@@ -39,6 +39,12 @@ async function jsonFetch(url,options={}){return extractJson(await textFetch(url,
 function writeHeaders(extra={}){
   return {"X-CSRF-Token":state.csrf,"X-TAMS-Control-Token":state.control,...extra};
 }
+async function renewConsoleSession(){
+  const session=await jsonFetch("/api/v1/console/session");
+  state.csrf=session.csrf_token||"";
+  if(!state.csrf)throw new Error("Controller returned no console CSRF token");
+  return session;
+}
 
 function setPage(name){
   $$(".page").forEach(element=>element.classList.toggle("active",element.id===`page-${name}`));
@@ -77,8 +83,7 @@ function updateLockUi(){
 
 async function initializeConsole(){
   try{
-    const session=await jsonFetch("/api/v1/console/session");
-    state.csrf=session.csrf_token||"";
+    await renewConsoleSession();
     state.control="";state.locked=true;updateLockUi();
   }catch(error){
     $("#lock-toggle").disabled=true;
@@ -88,6 +93,9 @@ async function initializeConsole(){
 $("#lock-toggle").onclick=async()=>{
   try{
     if(state.locked){
+      // The controller keeps console sessions in RAM. Renew here so a browser
+      // tab left open across a controller restart can unlock without reloading.
+      await renewConsoleSession();
       const result=await jsonFetch("/api/v1/console/unlock",{method:"POST",headers:{"X-CSRF-Token":state.csrf}});
       state.control=result.control_token;state.locked=false;showToast("Controls unlocked","success");
     }else{

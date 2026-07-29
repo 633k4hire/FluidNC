@@ -92,6 +92,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn('id="theme-toggle"', self.html)
         self.assertIn('localStorage.setItem("xza-theme"', self.html)
         self.assertIn('state.control=""', self.html)
+        self.assertIn("await renewConsoleSession();", self.html)
+        self.assertGreaterEqual(self.html.count("await renewConsoleSession();"), 2)
         self.assertIn('jsonFetch("/api/v1/console/lock",{method:"POST",headers:writeHeaders()})', self.html)
         self.assertNotIn('sessionStorage.setItem("tams-csrf"', self.html)
         self.assertNotIn("setTimeout(lock", self.html)
