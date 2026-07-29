@@ -98,7 +98,11 @@ namespace WebUI {
         static AuthenticationIP*   getAuthForRequest(AsyncWebServerRequest* request);
 #endif
         static std::string getSessionCookie(AsyncWebServerRequest* request);
-        static bool firmwareMutationAuthorized(AsyncWebServerRequest* request, bool requireRecentPassword = true);
+        static bool consoleMutationAuthorized(AsyncWebServerRequest* request);
+        static void        handleConsoleSession(AsyncWebServerRequest* request);
+        static void        handleConsoleUnlock(AsyncWebServerRequest* request);
+        static void        handleConsoleLock(AsyncWebServerRequest* request);
+        static void        handleSettingsApi(AsyncWebServerRequest* request);
         static void        handle_SSDP();
         static void        handle_root(AsyncWebServerRequest* request);
         static void        handle_login(AsyncWebServerRequest* request);

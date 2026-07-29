@@ -23,6 +23,7 @@
 #include "WebClient.h"
 
 #include "Protocol.h"  // protocol_send_event
+#include "RealtimeCmd.h"
 #include "State.h"
 #include "Planner.h"
 #include "GCode.h"
@@ -39,6 +40,7 @@
 #include "HashFS.h"
 #include <list>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <cctype>
@@ -77,6 +79,19 @@ namespace {
     };
 
     LastFirmwareValidation lastFirmwareValidation;
+
+    struct ConsoleSession {
+        bool        active = false;
+        uint32_t    remoteAddress = 0;
+        std::string id;
+        std::string csrf;
+        std::array<std::string, 8> controls;
+        size_t                      controlCursor = 0;
+    };
+
+    std::array<ConsoleSession, 8> consoleSessions;
+    size_t                        consoleSessionCursor = 0;
+
     struct ControllerFirmwareDeployment {
         bool                           active   = false;
         bool                           terminal = false;
@@ -153,6 +168,88 @@ namespace {
             value += digits[octet & 0x0f];
         }
         return value;
+    }
+
+    bool constantStringEquals(const std::string& left, const std::string& right) {
+        if (left.size() != right.size()) return false;
+        uint8_t difference = 0;
+        for (size_t index = 0; index < left.size(); ++index) {
+            difference |= static_cast<uint8_t>(left[index] ^ right[index]);
+        }
+        return difference == 0;
+    }
+
+    std::string cookieValue(AsyncWebServerRequest* request, const char* name) {
+        if (!request || !request->hasHeader("Cookie")) return {};
+        std::string cookies(request->getHeader("Cookie")->value().c_str());
+        std::string marker = std::string(name) + "=";
+        size_t position = cookies.find(marker);
+        while (position != std::string::npos && position > 0 && cookies[position - 1] != ' ' && cookies[position - 1] != ';') {
+            position = cookies.find(marker, position + marker.size());
+        }
+        if (position == std::string::npos) return {};
+        position += marker.size();
+        size_t end = cookies.find(';', position);
+        return cookies.substr(position, end == std::string::npos ? std::string::npos : end - position);
+    }
+
+    ConsoleSession* consoleSessionForRequest(AsyncWebServerRequest* request) {
+        const std::string id = cookieValue(request, "TAMSCONSOLE");
+        if (id.empty()) return nullptr;
+        const uint32_t remote = static_cast<uint32_t>(request->client()->remoteIP());
+        for (auto& session : consoleSessions) {
+            if (session.active && session.remoteAddress == remote && constantStringEquals(session.id, id)) {
+                return &session;
+            }
+        }
+        return nullptr;
+    }
+
+    ConsoleSession& createConsoleSession(AsyncWebServerRequest* request) {
+        ConsoleSession& session = consoleSessions[consoleSessionCursor++ % consoleSessions.size()];
+        session.active = true;
+        session.remoteAddress = static_cast<uint32_t>(request->client()->remoteIP());
+        session.id = randomHex(16);
+        session.csrf = randomHex(16);
+        for (auto& control : session.controls) control.clear();
+        session.controlCursor = 0;
+        return session;
+    }
+
+    bool consoleCsrfAuthorized(AsyncWebServerRequest* request) {
+        ConsoleSession* session = consoleSessionForRequest(request);
+        if (!session || !request->hasHeader("X-CSRF-Token")) return false;
+        return constantStringEquals(session->csrf, request->getHeader("X-CSRF-Token")->value().c_str());
+    }
+
+    bool consoleControlAuthorized(AsyncWebServerRequest* request) {
+        ConsoleSession* session = consoleSessionForRequest(request);
+        if (!session || !consoleCsrfAuthorized(request) || !request->hasHeader("X-TAMS-Control-Token")) {
+            return false;
+        }
+        const std::string candidate = request->getHeader("X-TAMS-Control-Token")->value().c_str();
+        if (candidate.empty()) return false;
+        for (const auto& control : session->controls) {
+            if (!control.empty() && constantStringEquals(control, candidate)) return true;
+        }
+        return false;
+    }
+
+    std::string issueConsoleControl(ConsoleSession& session) {
+        std::string& control = session.controls[session.controlCursor++ % session.controls.size()];
+        control = randomHex(24);
+        return control;
+    }
+
+    void revokeConsoleControl(ConsoleSession& session, AsyncWebServerRequest* request) {
+        if (!request->hasHeader("X-TAMS-Control-Token")) return;
+        const std::string candidate = request->getHeader("X-TAMS-Control-Token")->value().c_str();
+        for (auto& control : session.controls) {
+            if (!control.empty() && constantStringEquals(control, candidate)) {
+                control.clear();
+                return;
+            }
+        }
     }
 
     uint32_t controllerReleaseCounter() {
@@ -426,33 +523,6 @@ namespace {
         return command == "?" || command == "$G" || command == "ESP421" || command == "[ESP421]" ||
                command == "ESP424" || command == "[ESP424]" || command == "ESP426" ||
                command == "[ESP426]" || command == "ESP425" || command == "[ESP425]";
-    }
-
-    bool latheControlSafety(std::string& reason, Lathe::SharedChuckMode allowedChuckMode) {
-        if (!state_is(State::Idle)) {
-            reason = "machine state is not Idle";
-            return false;
-        }
-        if (plan_get_current_block() != nullptr) {
-            reason = "planner is not empty";
-            return false;
-        }
-        if (gc_state.modal.spindle != SpindleState::Disable) {
-            reason = "spindle must be off before accepting a new action";
-            return false;
-        }
-        if (Lathe::shared_chuck_enabled() && allowedChuckMode != Lathe::SharedChuckMode::Unavailable &&
-            Lathe::shared_chuck_mode() != allowedChuckMode) {
-            reason = "shared chuck ownership does not match the requested action";
-            return false;
-        }
-        auto turret = ATCs::maijker_turret_status();
-        if (turret.configured && turret.target_tool != 0) {
-            reason = "turret action is pending";
-            return false;
-        }
-        reason = "current server state permits the requested action";
-        return true;
     }
 
     struct FileListChunkState {
@@ -836,6 +906,11 @@ namespace WebUI {
 
         // Signed firmware deployment APIs. Raw /updatefw remains available for
         // attended controller recovery; the Maijker production UI never calls it.
+        _webserver->on("/api/v1/console/session", HTTP_GET, handleConsoleSession);
+        _webserver->on("/api/v1/console/unlock", HTTP_POST, handleConsoleUnlock);
+        _webserver->on("/api/v1/console/lock", HTTP_POST, handleConsoleLock);
+        _webserver->on("/api/v1/settings", HTTP_GET, handleSettingsApi);
+        _webserver->on("/api/v1/settings", HTTP_PUT, handleSettingsApi, nullptr, LatheApiBody);
         _webserver->on("/api/v1/firmware/devices", HTTP_GET, handleFirmwareDevices);
         _webserver->on("/api/v1/firmware/packages/validate",
                        HTTP_POST,
@@ -1117,7 +1192,7 @@ namespace WebUI {
 
     // Handle filenames and other things that are not explicitly registered
     void WebUI_Server::handle_not_found(AsyncWebServerRequest* request) {
-        if (is_authenticated(request) == AuthenticationLevel::LEVEL_GUEST) {
+        if (!Lathe::enabled() && is_authenticated(request) == AuthenticationLevel::LEVEL_GUEST) {
             request->redirect("/");
             //_webserver->client().stop();
             return;
@@ -1159,36 +1234,32 @@ namespace WebUI {
 
     void WebUI_Server::synchronousCommand(
         AsyncWebServerRequest* request, const char* cmd, bool silent, AuthenticationLevel auth_level, bool allowedInMotion) {
+        (void)auth_level;
         // Can we do this with async?
         if (http_block_during_motion->get() && inMotionState() && !allowedInMotion) {  // ESP800 is to allow a cached paged reload on webui3
             request->send(503, "text/plain", "Try again when not moving\n");
             return;
         }
         char line[256];
-        strncpy(line, cmd, 255);
-        AsyncWebServerResponse* response;
-        if (request->method() == HTTP_GET) {
-            WebClient* webClient = new WebClient();
-            webClient->attachWS(silent);
-            webClient->executeCommandBackground(line);
-            response = request->beginChunkedResponse("", [webClient, request](uint8_t* buffer, size_t maxLen, size_t total) mutable -> size_t {
-                // The method can change before the end... not good
-                //if(request->method() != HTTP_GET)
-                //    return 0;
-                auto ret = webClient->copyBufferSafe(buffer, min((int)maxLen, 1024), total);
-                return ret;
+        if (!cmd || strlen(cmd) >= sizeof(line)) {
+            request->send(413, "application/json", "{\"error\":\"typed command exceeds FluidNC line capacity; use the YAML file editor for structured configuration\"}");
+            return;
+        }
+        strncpy(line, cmd, sizeof(line) - 1);
+        line[sizeof(line) - 1] = '\0';
+        WebClient* webClient = new WebClient();
+        webClient->attachWS(silent);
+        webClient->executeCommandBackground(line);
+        AsyncWebServerResponse* response =
+            request->beginChunkedResponse("", [webClient](uint8_t* buffer, size_t maxLen, size_t total) mutable -> size_t {
+                return webClient->copyBufferSafe(buffer, min((int)maxLen, 1024), total);
             });
-            // onDisconnect MUST always happen, otherwise commands being processed will wait indefinitly to be read
-            // by the callback that may never happen if the client is dead
-            // We rely on AsyncWebServer to take care of that
-            request->onDisconnect([webClient]() {
-                webClient->detachWS();
-                allChannels.kill(webClient);
-                // Should not delete, kill() takes care of that
-                //delete webClient;
-            });
-        } else
-            response = request->beginResponse(200, "", "");
+        // Commands from typed POST/PUT APIs need the same execution path as
+        // read-only GET commands. The response callback drains the channel.
+        request->onDisconnect([webClient]() {
+            webClient->detachWS();
+            allChannels.kill(webClient);
+        });
         response->addHeader(T_Cache_Control, T_no_cache);
         request->send(response);
         return;
@@ -1443,6 +1514,11 @@ namespace WebUI {
     void WebUI_Server::fileUpload(
         AsyncWebServerRequest* request, const Volume& fs, String filename, size_t index, uint8_t* data, size_t len, bool final) {
         if (!index) {
+            if (Lathe::enabled() && !consoleControlAuthorized(request)) {
+                _upload_status = UploadStatus::FAILED;
+                pushError(request, ESP_ERROR_AUTHENTICATION, "Unlock this browser tab before uploading files", 403);
+                return;
+            }
             std::string sizeargname(filename.c_str());
             sizeargname += "S";
             size_t filesize = request->hasParam(sizeargname.c_str()) ? request->getParam(sizeargname.c_str())->value().toInt() : 0;
@@ -1470,6 +1546,100 @@ namespace WebUI {
         AsyncWebServerResponse* response = request->beginResponse(code, T_application_json, s);
         response->addHeader(T_Cache_Control, T_no_cache);
         request->send(response);
+    }
+
+    void WebUI_Server::handleConsoleSession(AsyncWebServerRequest* request) {
+        if (!Lathe::enabled()) {
+            request->send(404, "application/json", "{\"error\":\"operator console is available only for a confirmed lathe\"}");
+            return;
+        }
+        ConsoleSession* session = consoleSessionForRequest(request);
+        bool            created = false;
+        if (!session) {
+            session = &createConsoleSession(request);
+            created = true;
+        }
+        std::string json = "{\"locked\":true,\"csrf_token\":\"" + session->csrf +
+                           "\",\"scope\":\"browser_tab\"}";
+        AsyncWebServerResponse* response = request->beginResponse(200, T_application_json, json.c_str());
+        response->addHeader(T_Cache_Control, T_no_cache);
+        if (created) {
+            std::string cookie = "TAMSCONSOLE=" + session->id + "; HttpOnly; SameSite=Strict; Path=/";
+            response->addHeader("Set-Cookie", cookie.c_str());
+        }
+        request->send(response);
+    }
+
+    void WebUI_Server::handleConsoleUnlock(AsyncWebServerRequest* request) {
+        if (!Lathe::enabled() || !consoleCsrfAuthorized(request)) {
+            request->send(403, "application/json", "{\"error\":\"valid console session and CSRF token required\"}");
+            return;
+        }
+        ConsoleSession* session = consoleSessionForRequest(request);
+        const std::string control = issueConsoleControl(*session);
+        sendJSON(request,
+                 200,
+                 "{\"locked\":false,\"control_token\":\"" + jsonEscape(control) + "\"}");
+    }
+
+    void WebUI_Server::handleConsoleLock(AsyncWebServerRequest* request) {
+        if (!Lathe::enabled() || !consoleCsrfAuthorized(request)) {
+            request->send(403, "application/json", "{\"error\":\"valid console session and CSRF token required\"}");
+            return;
+        }
+        ConsoleSession* session = consoleSessionForRequest(request);
+        revokeConsoleControl(*session, request);
+        sendJSON(request, 200, "{\"locked\":true}");
+    }
+
+    void WebUI_Server::handleSettingsApi(AsyncWebServerRequest* request) {
+        auto* body = static_cast<FirmwareRequestBody*>(request->_tempObject);
+        auto cleanup = [&]() {
+            delete body;
+            request->_tempObject = nullptr;
+        };
+        if (!Lathe::enabled()) {
+            cleanup();
+            request->send(404, "application/json", "{\"error\":\"lathe settings API is not active\"}");
+            return;
+        }
+        if (request->method() == HTTP_GET) {
+            cleanup();
+            synchronousCommand(request, "[ESP400]json=yes", true, AuthenticationLevel::LEVEL_ADMIN, true);
+            return;
+        }
+        if (request->method() != HTTP_PUT) {
+            cleanup();
+            request->send(405, "application/json", "{\"error\":\"settings API requires GET or PUT\"}");
+            return;
+        }
+        if (!consoleControlAuthorized(request)) {
+            cleanup();
+            request->send(403, "application/json", "{\"error\":\"unlock this browser tab before changing settings\"}");
+            return;
+        }
+        if (!body || body->overflow || body->bytes.size() != body->expected) {
+            cleanup();
+            request->send(400, "application/json", "{\"error\":\"a bounded JSON body is required\"}");
+            return;
+        }
+        const std::string json = bodyString(body);
+        cleanup();
+        const std::string path = bodyJsonString(json, "path");
+        const std::string type = bodyJsonString(json, "type");
+        const std::string value = bodyJsonString(json, "value");
+        auto safeField = [](const std::string& field) {
+            return field.find_first_of("\r\n\"\\") == std::string::npos;
+        };
+        if (path.empty() || path.size() > 128 || type.size() != 1 ||
+            std::string("IRSAB").find(type[0]) == std::string::npos || value.size() > 256 ||
+            !safeField(path) || !safeField(value)) {
+            request->send(422, "application/json", "{\"error\":\"invalid typed setting value\"}");
+            return;
+        }
+        std::string command = "[ESP401]P=" + path + " T=" + type + " V=" + value;
+        // ESP401 applies the setting's own type, range, and state policy.
+        synchronousCommand(request, command.c_str(), true, AuthenticationLevel::LEVEL_ADMIN, true);
     }
 
     void WebUI_Server::sendAuth(AsyncWebServerRequest* request, const char* status, const char* level, const char* user) {
@@ -1515,15 +1685,10 @@ namespace WebUI {
 
     //Web Update handler
     void WebUI_Server::handleUpdate(AsyncWebServerRequest* request) {
-#ifdef ENABLE_AUTHENTICATION
-        bool authorized = firmwareMutationAuthorized(request, true);
-#else
-        AuthenticationLevel auth_level = is_authenticated(request);
-        bool authorized = auth_level == AuthenticationLevel::LEVEL_ADMIN;
-#endif
+        bool authorized = consoleMutationAuthorized(request);
         if (!authorized) {
             _upload_status = UploadStatus::NONE;
-            request->send(403, "text/plain", "Recent administrator authentication and CSRF token required\n");
+            request->send(403, "text/plain", "Unlock this browser tab before updating firmware\n");
             return;
         }
 
@@ -1544,12 +1709,7 @@ namespace WebUI {
         static size_t   last_upload_update;
         static uint32_t maxSketchSpace = UINT32_MAX;
 
-        //only admin can update FW
-#ifdef ENABLE_AUTHENTICATION
-        bool authorized = firmwareMutationAuthorized(request, true);
-#else
-        bool authorized = is_authenticated(request) == AuthenticationLevel::LEVEL_ADMIN;
-#endif
+        bool authorized = consoleMutationAuthorized(request);
         if (!authorized) {
             _upload_status = UploadStatus::FAILED;
             firmwareMaintenanceLock = false;
@@ -1638,14 +1798,8 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleFirmwareDevices(AsyncWebServerRequest* request) {
-#ifdef ENABLE_AUTHENTICATION
-        if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
-            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
-            return;
-        }
-        AuthenticationIP* auth = getAuthForRequest(request);
-        if (!auth) {
-            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+        if (!Lathe::enabled()) {
+            request->send(404, "application/json", "{\"error\":\"Maijker firmware service requires a confirmed lathe\"}");
             return;
         }
         auto& dial = DialFirmwareClient::instance();
@@ -1667,18 +1821,11 @@ namespace WebUI {
         json += ",";
         json += "\"trust_configured\":";
         json += TamsFirmware::trustConfigured() ? "true" : "false";
-        json += ",\"admin_password_hardened\":";
-        json += authentication_admin_password_is_default() ? "false" : "true";
         json += ",\"safe\":";
         json += safe ? "true" : "false";
-        json += ",\"safety_reason\":\"" + jsonEscape(safetyReason) + "\",\"csrf_token\":\"";
-        json += auth->csrfToken;
-        json += "\",\"maintenance_lock\":";
+        json += ",\"safety_reason\":\"" + jsonEscape(safetyReason) + "\",\"maintenance_lock\":";
         json += firmwareMaintenanceLock ? "true}" : "false}";
         sendJSON(request, 200, json);
-#else
-        request->send(503, "application/json", "{\"error\":\"Maijker authentication is not compiled\"}");
-#endif
     }
 
     void WebUI_Server::FirmwarePackageBody(
@@ -1696,12 +1843,12 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleFirmwarePackageValidation(AsyncWebServerRequest* request) {
-        if (!firmwareMutationAuthorized(request, false)) {
+        if (!Lathe::enabled() || !consoleCsrfAuthorized(request)) {
             if (request->_tempObject) {
                 delete static_cast<FirmwareValidationContext*>(request->_tempObject);
                 request->_tempObject = nullptr;
             }
-            request->send(403, "application/json", "{\"error\":\"administrator session and CSRF token required\"}");
+            request->send(403, "application/json", "{\"error\":\"valid same-origin console session required\"}");
             return;
         }
         auto* context = static_cast<FirmwareValidationContext*>(request->_tempObject);
@@ -1794,8 +1941,8 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleFirmwareReceipts(AsyncWebServerRequest* request) {
-        if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
-            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+        if (!Lathe::enabled()) {
+            request->send(404, "application/json", "{\"error\":\"Maijker firmware service requires a confirmed lathe\"}");
             return;
         }
         loadFirmwareReceipts();
@@ -1816,8 +1963,8 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleFirmwarePairStart(AsyncWebServerRequest* request) {
-        if (!firmwareMutationAuthorized(request, true)) {
-            request->send(403, "application/json", "{\"error\":\"recent administrator authentication and CSRF token required\"}");
+        if (!consoleMutationAuthorized(request)) {
+            request->send(403, "application/json", "{\"error\":\"unlock this browser tab before pairing\"}");
             return;
         }
         if (firmwareMaintenanceLock) {
@@ -1834,12 +1981,12 @@ namespace WebUI {
         sendJSON(request,
                  200,
                  "{\"comparison_code\":\"" + jsonEscape(comparisonCode) +
-                     "\",\"instruction\":\"Confirm this code, then press green on the M5Dial\"}");
+                     "\",\"instruction\":\"Compare this code, then press the M5Dial center button\"}");
     }
 
     void WebUI_Server::handleFirmwarePairConfirm(AsyncWebServerRequest* request) {
-        if (!firmwareMutationAuthorized(request, true)) {
-            request->send(403, "application/json", "{\"error\":\"recent administrator authentication and CSRF token required\"}");
+        if (!consoleMutationAuthorized(request)) {
+            request->send(403, "application/json", "{\"error\":\"unlock this browser tab before pairing\"}");
             return;
         }
         String comparisonCode =
@@ -1853,8 +2000,8 @@ namespace WebUI {
     }
 
     void WebUI_Server::handleFirmwarePairStatus(AsyncWebServerRequest* request) {
-        if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
-            request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+        if (!Lathe::enabled()) {
+            request->send(404, "application/json", "{\"error\":\"Maijker firmware service requires a confirmed lathe\"}");
             return;
         }
         bool paired = DialFirmwareClient::instance().pollPairing();
@@ -1899,8 +2046,8 @@ namespace WebUI {
 
         if (request->method() == HTTP_GET && !id.empty()) {
             cleanup();
-            if (is_authenticated(request) != AuthenticationLevel::LEVEL_ADMIN) {
-                request->send(403, "application/json", "{\"error\":\"administrator session required\"}");
+            if (!Lathe::enabled()) {
+                request->send(404, "application/json", "{\"error\":\"Maijker firmware service requires a confirmed lathe\"}");
                 return;
             }
             if (id == controllerDeployment.deploymentId) {
@@ -1926,9 +2073,9 @@ namespace WebUI {
             return;
         }
 
-        if (!firmwareMutationAuthorized(request, true)) {
+        if (!consoleMutationAuthorized(request)) {
             cleanup();
-            request->send(403, "application/json", "{\"error\":\"recent administrator authentication and CSRF token required\"}");
+            request->send(403, "application/json", "{\"error\":\"unlock this browser tab before deploying firmware\"}");
             return;
         }
 
@@ -2167,24 +2314,50 @@ namespace WebUI {
             delete body;
             request->_tempObject = nullptr;
         };
+        const std::string url = request->url().c_str();
+        if (request->method() == HTTP_GET && url == "/api/v1/lathe/status") {
+            cleanup();
+            if (!Lathe::enabled()) {
+                request->send(409, "application/json", "{\"error\":\"the active configuration is not a confirmed lathe\"}");
+                return;
+            }
+            synchronousCommand(request, "[ESP425]", true, AuthenticationLevel::LEVEL_ADMIN, true);
+            return;
+        }
         if (request->method() != HTTP_POST) {
             cleanup();
-            request->send(405, "application/json", "{\"error\":\"lathe control APIs require POST\"}");
+            request->send(405, "application/json", "{\"error\":\"lathe API requires GET status or a typed POST action\"}");
             return;
         }
-        if (!firmwareMutationAuthorized(request, false)) {
+        const bool stopAction = url == "/api/v1/lathe/spindle-stop" || url == "/api/v1/lathe/jog-cancel";
+        if (stopAction && !consoleCsrfAuthorized(request)) {
             cleanup();
-            request->send(403, "application/json", "{\"error\":\"administrator session and CSRF token required\"}");
+            request->send(403, "application/json", "{\"error\":\"valid same-origin console session required\"}");
             return;
         }
-        if (firmwareMaintenanceLock) {
+        if (!stopAction && !consoleMutationAuthorized(request)) {
             cleanup();
-            request->send(423, "application/json", "{\"error\":\"firmware maintenance lock rejects machine-control actions\"}");
+            request->send(403, "application/json", "{\"error\":\"unlock this browser tab before controlling the lathe\"}");
             return;
         }
         if (!Lathe::enabled()) {
             cleanup();
             request->send(409, "application/json", "{\"error\":\"the active configuration is not a confirmed lathe\"}");
+            return;
+        }
+        if (stopAction) {
+            cleanup();
+            if (url == "/api/v1/lathe/jog-cancel") {
+                if (state_is(State::Jog)) protocol_send_event(&motionCancelEvent);
+                sendJSON(request, 200, "{\"status\":\"jog_cancel_requested\"}");
+            } else {
+                synchronousCommand(request, "M5", true, AuthenticationLevel::LEVEL_ADMIN, true);
+            }
+            return;
+        }
+        if (firmwareMaintenanceLock) {
+            cleanup();
+            request->send(423, "application/json", "{\"error\":\"firmware maintenance lock rejects machine-control actions\"}");
             return;
         }
         if (!body || body->overflow || body->bytes.size() != body->expected) {
@@ -2193,31 +2366,23 @@ namespace WebUI {
             return;
         }
 
-        const std::string url  = request->url().c_str();
         const std::string json = bodyString(body);
         cleanup();
         char command[128] = {};
 
-        if (url == "/api/v1/lathe/spindle-stop") {
-            synchronousCommand(request, "M5", true, AuthenticationLevel::LEVEL_ADMIN);
-            return;
-        }
-
-        Lathe::SharedChuckMode allowedChuckMode = Lathe::SharedChuckMode::Idle;
-        if (url == "/api/v1/lathe/spindle") {
-            allowedChuckMode = Lathe::SharedChuckMode::Spindle;
-        } else if (url == "/api/v1/lathe/chuck") {
-            allowedChuckMode = Lathe::SharedChuckMode::Unavailable;
-        } else if (url == "/api/v1/lathe/jog" && bodyJsonString(json, "axis") == "C") {
-            allowedChuckMode = Lathe::SharedChuckMode::CPositioning;
-        }
-        std::string safetyReason;
-        if (!latheControlSafety(safetyReason, allowedChuckMode)) {
-            sendJSON(request, 409, "{\"error\":\"" + jsonEscape(safetyReason) + "\"}");
-            return;
-        }
-
-        if (url == "/api/v1/lathe/jog") {
+        if (url == "/api/v1/lathe/home") {
+            const std::string axis = bodyJsonString(json, "axis");
+            if (axis == "X") {
+                strncpy(command, "$HX", sizeof(command) - 1);
+            } else if (axis == "Z") {
+                strncpy(command, "$HZ", sizeof(command) - 1);
+            } else if (axis == "ALL" || axis == "XZ") {
+                strncpy(command, "$H=XZ", sizeof(command) - 1);
+            } else {
+                request->send(422, "application/json", "{\"error\":\"home axis must be X, Z, or ALL\"}");
+                return;
+            }
+        } else if (url == "/api/v1/lathe/jog") {
             std::string axis = bodyJsonString(json, "axis");
             double direction = 0, increment = 0, feed = 0;
             if (!bodyJsonNumber(json, "direction", direction) || !bodyJsonNumber(json, "increment", increment) ||
@@ -2330,12 +2495,21 @@ namespace WebUI {
             return;
         }
 
-        synchronousCommand(request, command, true, AuthenticationLevel::LEVEL_ADMIN);
+        // The typed endpoint validates the request shape; FluidNC's command
+        // handlers remain authoritative for state, alarms, limits, and hardware.
+        synchronousCommand(request, command, true, AuthenticationLevel::LEVEL_ADMIN, true);
     }
 
     void WebUI_Server::handleFileOps(AsyncWebServerRequest* request, const Volume& fs) {
-        //this is only for admin and user
-        if (is_authenticated(request) == AuthenticationLevel::LEVEL_GUEST) {
+        const bool mutation = request->hasParam("action") &&
+                              request->getParam("action")->value() != "list";
+        if (Lathe::enabled() && mutation && !consoleControlAuthorized(request)) {
+            _upload_status = UploadStatus::NONE;
+            request->send(403, "application/json", "{\"error\":\"unlock this browser tab before changing files\"}");
+            return;
+        }
+        // Generic FluidNC keeps the upstream account-based file policy.
+        if (!Lathe::enabled() && is_authenticated(request) == AuthenticationLevel::LEVEL_GUEST) {
             _upload_status = UploadStatus::NONE;
             sendAuthFailed(request);
             return;
@@ -2655,40 +2829,8 @@ namespace WebUI {
     }
 #endif
 
-    bool WebUI_Server::firmwareMutationAuthorized(AsyncWebServerRequest* request, bool requireRecentPassword) {
-#ifdef ENABLE_AUTHENTICATION
-        AuthenticationIP* auth = getAuthForRequest(request);
-        if (!auth || auth->level != AuthenticationLevel::LEVEL_ADMIN) {
-            return false;
-        }
-        if (authentication_admin_password_is_default()) {
-            return false;
-        }
-        if (static_cast<uint32_t>(millis() - auth->last_time) > 360000U) {
-            return false;
-        }
-        auth->last_time = millis();
-        if (requireRecentPassword && (uint32_t)(millis() - auth->authenticated_at) > 300000U) {
-            return false;
-        }
-        if (!request->hasHeader("X-CSRF-Token")) {
-            return false;
-        }
-        String supplied = request->getHeader("X-CSRF-Token")->value();
-        size_t expected_length = strlen(auth->csrfToken);
-        if (supplied.length() != expected_length) {
-            return false;
-        }
-        uint8_t difference = 0;
-        for (size_t index = 0; index < expected_length; ++index) {
-            difference |= static_cast<uint8_t>(supplied[index] ^ auth->csrfToken[index]);
-        }
-        return difference == 0;
-#else
-        (void)request;
-        (void)requireRecentPassword;
-        return false;
-#endif
+    bool WebUI_Server::consoleMutationAuthorized(AsyncWebServerRequest* request) {
+        return Lathe::enabled() && consoleControlAuthorized(request);
     }
 
 #ifdef ENABLE_AUTHENTICATION

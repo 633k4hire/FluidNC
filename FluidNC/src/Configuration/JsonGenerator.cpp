@@ -91,8 +91,35 @@ namespace Configuration {
         leave();
     }
 
-    void JsonGenerator::item(const char* name, std::vector<speedEntry>& value) {}
-    void JsonGenerator::item(const char* name, std::vector<float>& value) {}
+    void JsonGenerator::item(const char* name, std::vector<speedEntry>& value) {
+        enter(name);
+        std::ostringstream serialized;
+        serialized << std::fixed << std::setprecision(2);
+        const char* separator = "";
+        for (const auto& entry : value) {
+            serialized << separator << entry.speed << "=" << entry.percent << "%";
+            separator = " ";
+        }
+        const std::string text = serialized.str();
+        _encoder.begin_webui(_currentPath, "S", text.c_str(), 0, 255);
+        _encoder.end_object();
+        leave();
+    }
+
+    void JsonGenerator::item(const char* name, std::vector<float>& value) {
+        enter(name);
+        std::ostringstream serialized;
+        serialized << std::fixed << std::setprecision(3);
+        const char* separator = "";
+        for (float entry : value) {
+            serialized << separator << entry;
+            separator = " ";
+        }
+        const std::string text = serialized.str();
+        _encoder.begin_webui(_currentPath, "S", text.c_str(), 0, 255);
+        _encoder.end_object();
+        leave();
+    }
 
     void JsonGenerator::item(const char* name, UartData& wordLength, UartParity& parity, UartStop& stopBits) {
         enter(name);
@@ -116,38 +143,26 @@ namespace Configuration {
         leave();
     }
     void JsonGenerator::item(const char* name, Pin& value) {
-        // We commented this out, because pins are very confusing for users. The code is correct,
-        // but it really gives more support than it's worth.
-        /*
         enter(name);
-        auto sv = value.name();
-        _encoder.begin_webui(_currentPath, "S", sv.c_str(), 0, 255);
+        _encoder.begin_webui(_currentPath, "P", value.name());
+        _encoder.member("W", int32_t(0));
         _encoder.end_object();
         leave();
-        */
     }
 
     void JsonGenerator::item(const char* name, EventPin& value) {
-        // We commented this out, because pins are very confusing for users. The code is correct,
-        // but it really gives more support than it's worth.
-        /*
         enter(name);
-        auto sv = value.name();
-        _encoder.begin_webui(_currentPath, "S", sv.c_str(), 0, 255);
+        _encoder.begin_webui(_currentPath, "P", value.name());
+        _encoder.member("W", int32_t(0));
         _encoder.end_object();
         leave();
-        */
     }
     void JsonGenerator::item(const char* name, InputPin& value) {
-        // We commented this out, because pins are very confusing for users. The code is correct,
-        // but it really gives more support than it's worth.
-        /*
         enter(name);
-        auto sv = value.name();
-        _encoder.begin_webui(_currentPath, "S", sv.c_str(), 0, 255);
+        _encoder.begin_webui(_currentPath, "P", value.name());
+        _encoder.member("W", int32_t(0));
         _encoder.end_object();
         leave();
-        */
     }
 
     void JsonGenerator::item(const char* name, IPAddress& value) {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#10151c">
+  <meta name="theme-color" content="#0c1117">
   <title>XZA Lathe Console</title>
   <style>/*__APP_CSS__*/</style>
 </head>
@@ -17,7 +17,12 @@
       <span id="connection-dot" class="dot unknown"></span>
       <span id="connection-label">Connecting</span>
       <span id="machine-state" class="pill">Unknown</span>
-      <button id="login-button">Sign in</button>
+      <button id="lock-toggle" class="lock-button locked" aria-pressed="false" title="Unlock controls">
+        <span id="lock-icon" aria-hidden="true">🔒</span><span id="lock-label">Locked</span>
+      </button>
+      <button id="theme-toggle" class="icon-button" aria-label="Switch to light theme" title="Switch theme">
+        <span id="theme-icon" aria-hidden="true">☀️</span>
+      </button>
     </div>
   </header>
 
@@ -25,10 +30,13 @@
     <button data-page="dashboard" class="active">Dashboard</button>
     <button data-page="controls" data-lathe>Controls</button>
     <button data-page="tooling" data-lathe>Tooling</button>
+    <button data-page="settings">Settings</button>
     <button data-page="firmware">Firmware</button>
     <button data-page="files">Files</button>
     <button data-page="diagnostics">Diagnostics</button>
   </nav>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
 
   <main>
     <aside id="mode-banner" class="banner warning" hidden></aside>
@@ -38,17 +46,17 @@
         <article class="card dro">
           <span class="axis">X</span>
           <strong id="dro-x">—</strong>
-          <small id="dro-x-mode">machine / diameter mode unknown</small>
+          <small><span id="dro-x-work">—</span> work / <span id="dro-x-mode">mode unknown</span></small>
         </article>
         <article class="card dro">
           <span class="axis">Z</span>
           <strong id="dro-z">—</strong>
-          <small>machine / work coordinates</small>
+          <small><span id="dro-z-work">—</span> work coordinate</small>
         </article>
         <article class="card dro">
           <span class="axis axis-c">C</span>
           <strong id="dro-c">—</strong>
-          <small id="c-capability">angular positioning not established</small>
+          <small id="c-capability">Angular positioning not commissioned</small>
         </article>
       </div>
 
@@ -70,17 +78,16 @@
             <dt>C-axis position</dt><dd id="c-position">Unavailable</dd>
             <dt>Control mode</dt><dd id="spindle-mode">Fixed RPM</dd>
           </dl>
-          <p class="note">Spindle rotation and C-axis angular positioning share the chuck but are distinct, mutually exclusive modes.</p>
         </article>
         <article class="card">
           <div class="card-head"><h2>Five-position turret</h2><span id="turret-state" class="pill">Unknown</span></div>
           <div id="turret-stations" class="stations" aria-label="Turret stations"></div>
           <dl>
             <dt>Active / target</dt><dd id="turret-tools">— / —</dd>
-            <dt>Confirmation</dt><dd id="turret-confirmed">Unconfirmed</dd>
+            <dt>Position</dt><dd id="turret-confirmed">Unconfirmed</dd>
             <dt>Sensor</dt><dd id="turret-sensor">Not installed</dd>
           </dl>
-          <p id="turret-warning" class="note warning-text">Open-loop turret: visually confirm the physical station after power loss or interruption.</p>
+          <p id="turret-warning" class="note warning-text">Open-loop turret: set the physical station after power loss or interruption.</p>
         </article>
         <article class="card">
           <div class="card-head"><h2>Encoder / threading</h2><span id="encoder-state" class="pill danger">Not commissioned</span></div>
@@ -90,64 +97,146 @@
             <dt>Freshness</dt><dd id="encoder-freshness">Unavailable</dd>
             <dt>Threading</dt><dd id="threading">Disabled</dd>
           </dl>
-          <p class="note">Threading remains unavailable until encoder hardware and low-speed feedback are physically validated.</p>
         </article>
       </div>
     </section>
 
     <section id="page-controls" class="page">
-      <div class="grid controls-grid">
-        <article class="card">
-          <h2>Guarded X / Z / C jog</h2>
-          <p class="note">Commands are accepted only while the server reports a current, safe machine state.</p>
-          <div class="field-row">
-            <label>Increment <select id="jog-increment"><option>0.01</option><option>0.1</option><option>1</option><option>10</option></select> mm/deg</label>
-            <label>Feed <input id="jog-feed" type="number" min="1" max="2000" value="100"> mm/min</label>
+      <div class="operator-grid">
+        <article class="card operator-card">
+          <div class="card-head"><h2>X / Z Jog</h2><span id="jog-lock-state" class="pill">Locked</span></div>
+          <div class="jog-layout">
+            <div class="radial-jog" aria-label="X and Z incremental jog">
+              <button class="jog north" data-control="jog" data-axis="X" data-direction="1" data-write>X+</button>
+              <button class="jog west" data-control="jog" data-axis="Z" data-direction="-1" data-write>Z−</button>
+              <button class="jog-stop" data-control="jog-cancel">STOP</button>
+              <button class="jog east" data-control="jog" data-axis="Z" data-direction="1" data-write>Z+</button>
+              <button class="jog south" data-control="jog" data-axis="X" data-direction="-1" data-write>X−</button>
+            </div>
+            <div class="jog-options">
+              <span class="field-label">Increment (mm)</span>
+              <div id="jog-increments" class="step-stack">
+                <button data-increment="10">10</button>
+                <button data-increment="1" class="active">1</button>
+                <button data-increment="0.1">0.1</button>
+                <button data-increment="0.01">0.01</button>
+              </div>
+              <label>Feed (mm/min)<input id="jog-feed" type="number" min="1" max="2000" value="100"></label>
+            </div>
           </div>
-          <div class="jog-controls">
-            <button data-control="jog" data-axis="X" data-direction="-1">X−</button>
-            <button data-control="jog" data-axis="X" data-direction="1">X+</button>
-            <button data-control="jog" data-axis="Z" data-direction="-1">Z−</button>
-            <button data-control="jog" data-axis="Z" data-direction="1">Z+</button>
-            <button data-control="jog" data-axis="C" data-direction="-1">C−</button>
-            <button data-control="jog" data-axis="C" data-direction="1">C+</button>
+          <div class="control-dro-row">
+            <div><span>X machine</span><strong id="control-x-machine">—</strong><small id="control-x-work">— work</small></div>
+            <div><span>Z machine</span><strong id="control-z-machine">—</strong><small id="control-z-work">— work</small></div>
           </div>
-          <p id="control-disabled-reason" class="disabled-reason">Waiting for a fresh safe-state report.</p>
+          <div class="home-row">
+            <button data-control="home" data-axis="X" data-write>Home X</button>
+            <button data-control="home" data-axis="Z" data-write>Home Z</button>
+            <button data-control="home" data-axis="ALL" data-write>Home X + Z</button>
+          </div>
+          <p id="control-disabled-reason" class="disabled-reason">Unlock this browser tab to operate the lathe.</p>
         </article>
-        <article class="card">
-          <h2>Spindle</h2>
-          <p class="note">Shared-chuck ownership is explicit. Ownership changes never start spindle or C-axis motion.</p>
-          <div class="action-row">
-            <button data-control="chuck" data-mode="idle">Release chuck</button>
-            <button data-control="chuck" data-mode="spindle">Assign spindle</button>
-            <button data-control="chuck" data-mode="c_positioning">Assign C positioning</button>
+
+        <article class="card operator-card spindle-card">
+          <div class="card-head"><h2>Spindle / C</h2><span id="spindle-owner" class="pill">IDLE</span></div>
+          <div class="mode-switch" role="group" aria-label="Shared chuck ownership">
+            <button data-control="chuck" data-mode="spindle" data-write>Spindle</button>
+            <button data-control="chuck" data-mode="idle" data-write>Idle</button>
+            <button data-control="chuck" data-mode="c_positioning" data-write>C Axis</button>
           </div>
-          <label>Requested RPM <input id="spindle-rpm" type="number" min="0" max="10000" value="500"></label>
-          <div class="action-row">
-            <button data-control="spindle" data-direction="cw">Start CW</button>
-            <button data-control="spindle" data-direction="ccw">Start CCW</button>
-            <button data-control="spindle-stop" class="danger-button">Stop spindle</button>
+
+          <div id="spindle-motion-panel">
+            <div id="rpm-gauge" class="rpm-gauge">
+              <div class="rpm-gauge-inner"><strong id="gauge-rpm">0</strong><span>RPM</span><small id="gauge-direction">OFF</small></div>
+            </div>
+            <div class="rpm-controls">
+              <label>Requested RPM<input id="spindle-rpm" type="number" min="0" max="10000" value="500"></label>
+              <input id="spindle-slider" class="range" type="range" min="0" max="5000" step="10" value="500" aria-label="Requested spindle RPM">
+              <div class="spindle-actions">
+                <button data-control="spindle" data-direction="ccw" data-write>CCW</button>
+                <button data-control="spindle-stop" class="stop-button">STOP</button>
+                <button data-control="spindle" data-direction="cw" data-write>CW</button>
+              </div>
+            </div>
           </div>
-        </article>
-        <article class="card">
-          <h2>Turret</h2>
-          <div id="turret-control-stations" class="stations"></div>
-          <button id="confirm-station">Confirm visually inspected physical station</button>
-          <p class="note">Tool selection is deliberate and never repeated automatically after timeout or reset.</p>
+
+          <div id="c-motion-panel" hidden>
+            <div class="angle-display"><strong id="c-angle">—</strong><span>degrees</span></div>
+            <div class="field-row">
+              <label>Increment
+                <select id="c-increment"><option>0.1</option><option>1</option><option>10</option><option>90</option></select>
+              </label>
+              <label>Feed (deg/min)<input id="c-feed" type="number" min="1" max="2000" value="100"></label>
+            </div>
+            <div class="spindle-actions">
+              <button data-control="jog" data-axis="C" data-direction="-1" data-write>C−</button>
+              <button data-control="jog-cancel" class="stop-button">STOP</button>
+              <button data-control="jog" data-axis="C" data-direction="1" data-write>C+</button>
+            </div>
+            <p id="c-disabled-reason" class="disabled-reason">C positioning requires commissioned encoder feedback.</p>
+          </div>
+
+          <div class="feedback-strip">
+            <span>Commanded <strong id="control-commanded-rpm">0</strong></span>
+            <span>Measured <strong id="control-measured-rpm">—</strong></span>
+            <span>Encoder <strong id="control-encoder-state">Not commissioned</strong></span>
+          </div>
         </article>
       </div>
+
+      <article class="card turret-control-card">
+        <div class="card-head"><h2>Five-position Turret</h2><span id="turret-control-status" class="pill">Unknown</span></div>
+        <div id="turret-control-stations" class="stations stations-large"></div>
+        <div class="station-setter">
+          <label>Current physical station
+            <select id="physical-station"><option value="1">T1</option><option value="2">T2</option><option value="3">T3</option><option value="4">T4</option><option value="5">T5</option></select>
+          </label>
+          <button id="set-physical-station" data-write>Set current tool — station visually verified</button>
+        </div>
+      </article>
     </section>
 
     <section id="page-tooling" class="page">
       <article class="card table-card">
-        <div class="card-head"><h2>Five-tool table</h2><button id="refresh-tools">Refresh</button></div>
+        <div class="card-head"><h2>Five-tool Table</h2><button id="refresh-tools">Refresh</button></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Tool</th><th>Geometry X</th><th>Geometry Z</th><th>Wear X</th><th>Wear Z</th><th>Nose radius</th><th>Orientation</th><th></th></tr></thead>
             <tbody id="tool-table"></tbody>
           </table>
         </div>
-        <p class="note">Tool edits use guarded ESP422 semantics. Touch-off is a separate, confirmed ESP423 action; probing never writes offsets automatically.</p>
+      </article>
+      <article class="card touch-card">
+        <h2>Explicit Touch-off</h2>
+        <div class="field-row">
+          <label>Tool<select id="touch-tool"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+          <label>Axis<select id="touch-axis"><option>X</option><option>Z</option></select></label>
+          <label>Machine coordinate<input id="touch-machine" type="number" step="0.001"></label>
+          <label>Reference coordinate<input id="touch-reference" type="number" step="0.001"></label>
+          <label>X mode<select id="touch-mode"><option value="diameter">Diameter</option><option value="radius">Radius</option></select></label>
+          <button id="apply-touch-off" data-write>Apply touch-off</button>
+        </div>
+        <p class="note">This writes the entered offset. It never starts a probe cycle.</p>
+      </article>
+    </section>
+
+    <section id="page-settings" class="page">
+      <article class="card settings-card">
+        <div class="settings-toolbar">
+          <div class="segmented" role="tablist">
+            <button class="active" data-settings-tab="Flash/Settings">Flash Settings</button>
+            <button data-settings-tab="Running/Config">Config Items</button>
+          </div>
+          <input id="settings-search" type="search" placeholder="Search settings" aria-label="Search settings">
+          <button id="refresh-settings">Refresh</button>
+        </div>
+        <p id="settings-summary" class="note">Loading FluidNC setting metadata…</p>
+        <p class="note">Config Items exposes the live FluidNC configuration tree. Pin assignments are shown read-only because FluidNC applies those at boot; edit them in the controller YAML on the Files page and restart when ready.</p>
+        <div class="table-wrap">
+          <table class="settings-table">
+            <thead><tr><th>Label</th><th>Value</th><th></th></tr></thead>
+            <tbody id="settings-body"></tbody>
+          </table>
+        </div>
       </article>
     </section>
 
@@ -155,7 +244,7 @@
       <div id="firmware-safety" class="banner warning">Firmware status is loading. Updates remain disabled.</div>
       <div class="grid firmware-grid">
         <article class="card firmware-card">
-          <div class="card-head"><h2>FluidNC Controller</h2><span id="controller-online" class="pill">Online</span></div>
+          <div class="card-head"><h2>FluidNC Controller</h2><span id="controller-online" class="pill good">Online</span></div>
           <dl>
             <dt>Hardware identity</dt><dd id="controller-id">—</dd>
             <dt>Installed version</dt><dd id="controller-version">—</dd>
@@ -163,7 +252,7 @@
           </dl>
           <label class="file-picker">Signed controller package<input id="controller-package" type="file" accept=".tamsfw"></label>
           <div id="controller-validation" class="validation"></div>
-          <button id="update-controller" disabled>Update FluidNC</button>
+          <button id="update-controller" data-write disabled>Update FluidNC</button>
           <ol id="controller-progress" class="progress"></ol>
           <details><summary>Last deployment and recovery</summary><pre id="last-controller-receipt">No receipt recorded</pre></details>
         </article>
@@ -176,10 +265,14 @@
             <dt>Address / role</dt><dd id="dial-address">—</dd>
             <dt>Installed version</dt><dd id="dial-version">—</dd>
           </dl>
-          <div class="inline-actions"><button id="pair-dial">Pair M5Dial</button><span id="pair-status" class="note">Open the OTA scene on the M5Dial to create a physical pairing window.</span></div>
+          <div class="pairing-box">
+            <button id="pair-dial" data-write>Pair M5Dial</button>
+            <strong id="pair-code" hidden>------</strong>
+            <span id="pair-status" class="note">Pairing can be started while FluidDial is running normally.</span>
+          </div>
           <label class="file-picker">Signed M5Dial package<input id="dial-package" type="file" accept=".tamsfw"></label>
           <div id="dial-validation" class="validation"></div>
-          <button id="update-dial" disabled>Update M5Dial</button>
+          <button id="update-dial" data-write disabled>Update M5Dial</button>
           <p id="dial-update-reason" class="disabled-reason">A unique paired and healthy M5Dial is required.</p>
           <ol id="dial-progress" class="progress"></ol>
           <details><summary>Last deployment and recovery</summary><pre id="last-dial-receipt">No receipt recorded</pre></details>
@@ -189,52 +282,48 @@
     </section>
 
     <section id="page-files" class="page">
-      <article class="card">
-        <div class="card-head"><h2>Files</h2><button id="refresh-files">Refresh</button></div>
-        <pre id="files-output">Use the existing /files and WebDAV endpoints for configuration and job files.</pre>
-      </article>
+      <div class="files-grid">
+        <article class="card">
+          <div class="card-head"><h2>Controller Files</h2><button id="refresh-files">Refresh</button></div>
+          <label class="file-picker">Upload file<input id="file-upload" type="file" data-write></label>
+          <div id="file-list" class="file-list"></div>
+          <p id="file-space" class="note">Storage status unavailable.</p>
+        </article>
+        <article class="card file-editor-card">
+          <div class="card-head"><h2 id="editor-title">File Editor</h2><span id="editor-state" class="pill">No file open</span></div>
+          <input id="editor-name" placeholder="config.yaml" aria-label="File name">
+          <textarea id="file-editor" spellcheck="false" placeholder="Select a controller text file or enter a new filename."></textarea>
+          <div class="action-row">
+            <button id="save-file" data-write>Save to DLC32</button>
+            <button id="download-file" disabled>Download</button>
+            <button id="delete-file" class="danger-button" data-write disabled>Delete</button>
+          </div>
+          <p class="note">Open and Save work against the DLC32 filesystem, not a browser copy. Configuration changes take effect according to FluidNC’s normal reload/restart rules.</p>
+        </article>
+      </div>
     </section>
 
     <section id="page-diagnostics" class="page">
       <div class="grid">
         <article class="card">
-          <div class="card-head"><h2>Raw capability reports</h2><button id="refresh-diagnostics">Refresh</button></div>
+          <div class="card-head"><h2>Typed Controller Snapshot</h2><button id="refresh-diagnostics">Refresh</button></div>
           <pre id="raw-reports">—</pre>
         </article>
         <article class="card">
-          <h2>Legacy command console</h2>
-          <p class="note warning-text">Administrative diagnostics only. Firmware deployment never uses this channel.</p>
-          <form id="legacy-command-form">
-            <input id="legacy-command" autocomplete="off" placeholder="[ESP421]">
-            <button>Send</button>
-          </form>
-          <pre id="legacy-output">—</pre>
+          <h2>Console State</h2>
+          <dl>
+            <dt>Browser control</dt><dd id="diag-lock">Locked</dd>
+            <dt>Telemetry</dt><dd id="diag-telemetry">Waiting</dd>
+            <dt>Firmware maintenance</dt><dd id="diag-maintenance">Unknown</dd>
+            <dt>UI build</dt><dd>Operator Console v2</dd>
+          </dl>
+          <p class="note">The production Maijker interface exposes typed operations only. Arbitrary command strings are not accepted here.</p>
         </article>
       </div>
     </section>
   </main>
 
-  <dialog id="confirm-dialog">
-    <form method="dialog">
-      <h2 id="confirm-title">Confirm action</h2>
-      <p id="confirm-message"></p>
-      <div class="dialog-actions"><button value="cancel">Cancel</button><button value="confirm" class="primary">Confirm</button></div>
-    </form>
-  </dialog>
-
-  <dialog id="login-dialog">
-    <form id="login-form">
-      <h2>Administrator sign in</h2>
-      <label>User <input id="login-user" value="admin" autocomplete="username"></label>
-      <label>Password <input id="login-password" type="password" autocomplete="current-password"></label>
-      <label>New password <input id="login-new-password" type="password" minlength="12" maxlength="16" autocomplete="new-password" placeholder="Optional, 12–16 characters"></label>
-      <label>Confirm new password <input id="login-confirm-password" type="password" minlength="12" maxlength="16" autocomplete="new-password"></label>
-      <p id="login-error" class="warning-text"></p>
-      <div class="dialog-actions"><button type="button" id="login-cancel">Cancel</button><button class="primary">Sign in</button></div>
-    </form>
-  </dialog>
-
-  <footer><span>Maijker XZA-Lathe</span><span id="ui-version">Web Console v1</span></footer>
+  <footer><span>Maijker XZA-Lathe</span><span id="ui-version">Operator Console v2</span></footer>
   <script>/*__APP_JS__*/</script>
 </body>
 </html>

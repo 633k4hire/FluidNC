@@ -1,189 +1,334 @@
 "use strict";
-const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
-const state={lathe:false,fresh:false,safe:false,cReady:false,spindleReady:false,latheRaw:"",chuckRaw:"",firmware:null,package:{controller:null,dial:null}};
-const esc=s=>String(s??"—").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-function setPage(name){
-  $$(".page").forEach(e=>e.classList.toggle("active",e.id===`page-${name}`));
-  $$("nav button").forEach(e=>e.classList.toggle("active",e.dataset.page===name));
+const $=selector=>document.querySelector(selector);
+const $$=selector=>[...document.querySelectorAll(selector)];
+const state={
+  csrf:"",control:"",locked:true,fresh:false,lathe:true,
+  telemetry:null,settings:[],settingsTab:"Flash/Settings",
+  jogIncrement:1,firmware:null,package:{controller:null,dial:null},
+  currentFile:""
+};
+const esc=value=>String(value??"—").replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+
+function showToast(message,type="info",timeout=4500){
+  const toast=document.createElement("div");
+  toast.className=`toast ${type}`;toast.textContent=message;
+  $("#toast-region").append(toast);
+  setTimeout(()=>toast.remove(),timeout);
 }
-$$("nav button").forEach(b=>b.onclick=()=>setPage(b.dataset.page));
 
 async function textFetch(url,options={}){
   const response=await fetch(url,{cache:"no-store",credentials:"same-origin",...options});
   const text=await response.text();
-  if(!response.ok)throw new Error(text||`${response.status} ${response.statusText}`);
+  if(!response.ok){
+    let message=text||`${response.status} ${response.statusText}`;
+    try{message=JSON.parse(text).error||message;}catch(_){}
+    throw new Error(message);
+  }
   return text;
 }
-async function jsonFetch(url,options={}){return JSON.parse(await textFetch(url,options));}
-async function command(cmd){return textFetch(`/command?cmd=${encodeURIComponent(cmd)}`);}
-
-async function refreshAuth(){
-  try{
-    const auth=await jsonFetch("/login");
-    const level=auth.authentication_lvl||"guest";
-    $("#login-button").textContent=level==="admin"?"Administrator":"Sign in";
-    return level;
-  }catch(_){$("#login-button").textContent="Sign in";return "guest";}
+function extractJson(text){
+  const first=text.indexOf("{"),array=text.indexOf("[");
+  let start=first<0?array:array<0?first:Math.min(first,array);
+  if(start<0)throw new Error("Controller returned no JSON");
+  const open=text[start],end=text.lastIndexOf(open==="{"?"}":"]");
+  if(end<start)throw new Error("Controller returned incomplete JSON");
+  return JSON.parse(text.slice(start,end+1));
 }
-$("#login-button").onclick=()=>{$("#login-error").textContent="";$("#login-dialog").showModal();$("#login-password").focus();};
-$("#login-cancel").onclick=()=>$("#login-dialog").close();
-$("#login-form").onsubmit=async event=>{
-  event.preventDefault();$("#login-error").textContent="";
-  const next=$("#login-new-password").value,confirmed=$("#login-confirm-password").value;
-  if(next!==confirmed){$("#login-error").textContent="New passwords do not match.";return;}
-  if(next&&(next.length<12||next.length>16)){$("#login-error").textContent="New password must be 12–16 characters.";return;}
-  const body=new URLSearchParams({SUBMIT:"1",USER:$("#login-user").value,PASSWORD:$("#login-password").value});
-  if(next)body.set("NEWPASSWORD",next);
+async function jsonFetch(url,options={}){return extractJson(await textFetch(url,options));}
+function writeHeaders(extra={}){
+  return {"X-CSRF-Token":state.csrf,"X-TAMS-Control-Token":state.control,...extra};
+}
+
+function setPage(name){
+  $$(".page").forEach(element=>element.classList.toggle("active",element.id===`page-${name}`));
+  $$("nav button").forEach(element=>element.classList.toggle("active",element.dataset.page===name));
+  if(name==="settings"&&!state.settings.length)refreshSettings();
+  if(name==="files")refreshFiles();
+}
+$$("nav button").forEach(button=>button.onclick=()=>setPage(button.dataset.page));
+
+function applyTheme(theme){
+  document.documentElement.dataset.theme=theme;
+  localStorage.setItem("xza-theme",theme);
+  const dark=theme==="dark";
+  $("#theme-icon").textContent=dark?"☀️":"🌙";
+  $("#theme-toggle").setAttribute("aria-label",dark?"Switch to light theme":"Switch to dark theme");
+  document.querySelector('meta[name="theme-color"]').content=dark?"#0c1117":"#eef3f7";
+}
+const savedTheme=localStorage.getItem("xza-theme");
+applyTheme(savedTheme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"));
+$("#theme-toggle").onclick=()=>applyTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
+
+function updateLockUi(){
+  $("#lock-label").textContent=state.locked?"Locked":"Unlocked";
+  $("#lock-icon").textContent=state.locked?"🔒":"🔓";
+  $("#lock-toggle").className=`lock-button ${state.locked?"locked":"unlocked"}`;
+  $("#lock-toggle").setAttribute("aria-pressed",String(!state.locked));
+  $("#lock-toggle").title=state.locked?"Unlock controls":"Lock controls";
+  $("#jog-lock-state").textContent=state.locked?"Locked":"Unlocked";
+  $("#jog-lock-state").className=`pill ${state.locked?"":"good"}`;
+  $("#diag-lock").textContent=state.locked?"Locked":"Unlocked";
+  $$("[data-write]").forEach(element=>element.disabled=state.locked||element.dataset.serverDisabled==="true");
+  $("#control-disabled-reason").textContent=state.locked?"Unlock this browser tab to operate the lathe.":"Direct operator control is active. Controller-native limits and alarms remain authoritative.";
+  updateFirmwareButtons();
+  updateCControls();
+}
+
+async function initializeConsole(){
   try{
-    const response=await fetch("/login",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
-    const result=await response.json();if(!response.ok)throw new Error(result.status||"Sign-in failed");
-    $("#login-password").value="";$("#login-new-password").value="";$("#login-confirm-password").value="";$("#login-dialog").close();await refreshAuth();await refreshStatus();await refreshFirmware();
-  }catch(error){$("#login-error").textContent=error.message;}
+    const session=await jsonFetch("/api/v1/console/session");
+    state.csrf=session.csrf_token||"";
+    state.control="";state.locked=true;updateLockUi();
+  }catch(error){
+    $("#lock-toggle").disabled=true;
+    showToast(`Console session unavailable: ${error.message}`,"error",8000);
+  }
+}
+$("#lock-toggle").onclick=async()=>{
+  try{
+    if(state.locked){
+      const result=await jsonFetch("/api/v1/console/unlock",{method:"POST",headers:{"X-CSRF-Token":state.csrf}});
+      state.control=result.control_token;state.locked=false;showToast("Controls unlocked","success");
+    }else{
+      await jsonFetch("/api/v1/console/lock",{method:"POST",headers:writeHeaders()});
+      state.control="";state.locked=true;showToast("Controls locked");
+    }
+    updateLockUi();
+  }catch(error){showToast(error.message,"error");}
 };
 
-function parsePairs(raw){
-  const out={};
-  try{
-    const start=raw.indexOf("{"),end=raw.lastIndexOf("}");
-    const parsed=JSON.parse(raw.slice(start,end+1));
-    if(Array.isArray(parsed.data))for(const item of parsed.data||[])if(item&&item.id!==undefined)out[String(item.id).trim().toLowerCase().replace(/\s+/g,"_")]=item.value;
-    for(const [key,value] of Object.entries(parsed))if(value===null||["string","number","boolean"].includes(typeof value))out[key.toLowerCase().replace(/\s+/g,"_")]=value;
-    out._json=parsed;return out;
-  }catch(_){}
-  for(const line of raw.split(/\r?\n/)){
-    const match=line.match(/^\s*([^:=]+)\s*[:=]\s*(.*?)\s*$/);
-    if(match)out[match[1].trim().toLowerCase().replace(/\s+/g,"_")]=match[2].trim();
-  }
-  return out;
+function number(value,fallback="—"){
+  if(value===null||value===undefined)return fallback;
+  const parsed=Number(value);return Number.isFinite(parsed)?parsed.toFixed(3):fallback;
 }
-function first(data,...keys){for(const key of keys)if(data[key]!==undefined)return data[key];return "—";}
-function truthy(value){return /^(1|true|yes|on|enabled|idle|confirmed)$/i.test(String(value));}
-function number(value,fallback="—"){const n=Number(value);return Number.isFinite(n)?n.toFixed(3):fallback;}
-
 function renderStations(container,active,target,controls=false){
   container.innerHTML="";
-  for(let i=1;i<=5;i++){
+  for(let tool=1;tool<=5;tool++){
     const element=document.createElement(controls?"button":"span");
-    element.className=`station${String(active)===String(i)?" active":""}${String(target)===String(i)?" target":""}`;
-    element.textContent=`T${i}`;
-    if(controls){element.dataset.control="turret";element.dataset.tool=String(i);element.disabled=!state.safe;}
+    element.className=`station${Number(active)===tool?" active":""}${Number(target)===tool?" target":""}`;
+    element.textContent=`T${tool}`;
+    if(controls){
+      element.dataset.control="turret";element.dataset.tool=String(tool);
+      element.dataset.write="";element.disabled=state.locked;
+    }
     container.append(element);
   }
 }
 
-function renderLathe(raw,chuckRaw,telemetryRaw){
-  const data=parsePairs(raw),chuck=parsePairs(chuckRaw),telemetry=parsePairs(telemetryRaw)._json||{};
-  const positions=telemetry.positions||{},spindle=telemetry.spindle||{},encoder=spindle.encoder||{},turret=telemetry.turret||{},execution=telemetry.execution||{},machine=telemetry.machine||{};
-  Object.assign(data,{
-    machine_x:positions.x?.machine,machine_z:positions.z?.machine,machine_c:positions.c?.machine,
-    diameter_mode:spindle.diameter_mode,coordinate_mode:execution.coordinate_system,distance_mode:execution.distance_mode,
-    feed_mode:execution.feed_mode,limits:[positions.x,positions.z,positions.c].map((p,i)=>p?.limit_active?["X","Z","C"][i]:"").filter(Boolean).join(", ")||"Clear",
-    alarm:machine.alarm,state:machine.state,homed:[positions.x,positions.z,positions.c].filter(p=>p?.available).every(p=>p?.homed),
-    active_tool:turret.current_station,target_tool:turret.target_station,tool_confirmed:turret.software_position_known,
-    turret_state:turret.last_error,turret_sensor:turret.sensor_configured,encoder_enabled:encoder.configured,
-    measured_rpm:spindle.measured_rpm,index_seen:encoder.has_index,angular_position:encoder.angular_position_revolution,
-    encoder_stale:encoder.stale,encoder_fault:encoder.fault,commanded_rpm:spindle.commanded_rpm,
-    spindle_state:spindle.state,spindle_mode:spindle.speed_mode,shared_chuck_enabled:spindle.shared_chuck
-  });
-  state.lathe=truthy(first(data,"lathe_enabled","enabled","lathe"));
-  state.fresh=true;
-  const mode=$("#mode-banner");
+function renderTelemetry(data){
+  state.telemetry=data;state.fresh=true;
+  const machine=data.machine||{},execution=data.execution||{},positions=data.positions||{};
+  const spindle=data.spindle||{},encoder=spindle.encoder||{},turret=data.turret||{};
+  state.lathe=/lathe/i.test(machine.model||"")||spindle.c_axis==="C";
+  $("#mode-banner").hidden=state.lathe;
   if(!state.lathe){
-    mode.hidden=false;mode.textContent="This controller did not confirm lathe support. Lathe-specific controls are hidden; Files and Diagnostics remain available.";
-    $$("[data-lathe]").forEach(e=>e.hidden=true);
-    $("#title").textContent="FluidNC Console";
-    return;
+    $("#mode-banner").textContent="The controller did not report the Maijker lathe telemetry contract.";
+    $$("[data-lathe]").forEach(element=>element.hidden=true);
   }
-  mode.hidden=true;$$("[data-lathe]").forEach(e=>e.hidden=false);$("#title").textContent="XZA Lathe Console";
-  $("#dro-x").textContent=number(first(data,"machine_x","mpos_x","x"));
-  $("#dro-z").textContent=number(first(data,"machine_z","mpos_z","z"));
-  $("#dro-c").textContent=number(first(data,"machine_c","mpos_c","c"));
-  $("#dro-x-mode").textContent=`machine / ${first(data,"diameter_mode","x_mode")} mode`;
-  $("#coordinate-mode").textContent=first(data,"coordinate_mode","distance_mode","plane");
-  $("#feed-mode").textContent=first(data,"feed_mode");
-  $("#limits").textContent=first(data,"limits","limit_state");
-  $("#alarm").textContent=first(data,"alarm","alarm_code");
-  const machineState=String(first(data,"state","machine_state"));
-  $("#machine-state").textContent=machineState;
-  const homed=truthy(first(data,"homed","axes_homed"));
-  $("#homed").textContent=homed?"Homed":"Unhomed";$("#homed").className=`pill ${homed?"good":"danger"}`;
-  const active=first(data,"active_tool","current_tool"),target=first(data,"target_tool");
-  renderStations($("#turret-stations"),active,target);renderStations($("#turret-control-stations"),active,target,true);
-  $("#turret-tools").textContent=`T${active} / T${target}`;
-  const confirmed=truthy(first(data,"tool_confirmed","turret_confirmed"));
-  $("#turret-confirmed").textContent=confirmed?"Confirmed":"Unconfirmed";
-  $("#turret-state").textContent=first(data,"turret_state","tool_state");
-  const sensor=truthy(first(data,"turret_sensor","sensor_configured"));
-  $("#turret-sensor").textContent=sensor?"Installed":"Not installed";
-  $("#turret-warning").hidden=sensor;
-  const encoderReady=truthy(first(data,"encoder_enabled","encoder_enable"));
-  const threading=truthy(first(data,"threading_enabled","enable_threading"));
-  $("#encoder-state").textContent=encoderReady?"Enabled / verify health":"Not commissioned";
-  $("#encoder-state").className=`pill ${encoderReady?"":"danger"}`;
-  $("#encoder-rpm").textContent=first(data,"measured_rpm","encoder_rpm");
-  $("#encoder-phase").textContent=`${first(data,"index_seen","encoder_index")} / ${first(data,"angular_position","encoder_phase")}`;
-  $("#encoder-freshness").textContent=first(data,"encoder_stale","encoder_fault","not commissioned");
-  $("#threading").textContent=threading?"Enabled — verify commissioning":"Disabled";
-  $("#spindle-command").textContent=`${first(data,"commanded_rpm","spindle_rpm")} RPM / ${first(data,"spindle_direction","spindle_state")}`;
-  $("#spindle-measured").textContent=encoderReady?`${first(data,"measured_rpm","encoder_rpm")} RPM`:"Not commissioned";
-  $("#spindle-mode").textContent=first(data,"spindle_mode","css_mode");
-  $("#c-position").textContent=first(data,"angular_position","c_axis_position");
-  const owner=first(chuck,"owner","shared_chuck_owner","mode")!=="—"?first(chuck,"owner","shared_chuck_owner","mode"):spindle.mode;
-  $("#chuck-owner").textContent=`Owner: ${owner}`;
-  state.cReady=encoderReady&&/c.?position/i.test(owner);
-  state.spindleReady=!truthy(first(data,"shared_chuck_enabled"))||/spindle/i.test(owner);
-  $("#c-capability").textContent=encoderReady?"position feedback present; verify health":"angular positioning not commissioned";
-  state.safe=/^idle$/i.test(machineState)&&!threading;
-  updateControlState();
+  const x=positions.x||{},z=positions.z||{},c=positions.c||{};
+  $("#dro-x").textContent=number(x.machine);$("#dro-x-work").textContent=number(x.work);
+  $("#dro-z").textContent=number(z.machine);$("#dro-z-work").textContent=number(z.work);
+  $("#dro-c").textContent=number(c.machine);$("#c-angle").textContent=number(c.machine);
+  $("#control-x-machine").textContent=number(x.machine);$("#control-x-work").textContent=`${number(x.work)} work`;
+  $("#control-z-machine").textContent=number(z.machine);$("#control-z-work").textContent=`${number(z.work)} work`;
+  $("#dro-x-mode").textContent=`${spindle.diameter_mode||"unknown"} mode`;
+  $("#coordinate-mode").textContent=`${execution.coordinate_system||"—"} / ${execution.distance_mode||"—"}`;
+  $("#feed-mode").textContent=execution.feed_mode||"—";
+  const activeLimits=[["X",x],["Z",z],["C",c]].filter(([,axis])=>axis.limit_active).map(([name])=>name);
+  $("#limits").textContent=activeLimits.length?activeLimits.join(", "):"Clear";
+  $("#alarm").textContent=machine.alarm||"None";
+  $("#machine-state").textContent=machine.state||"Unknown";
+  const homed=[x,z].every(axis=>axis.available&&axis.homed);
+  $("#homed").textContent=homed?"X / Z Homed":"Unhomed";
+  $("#homed").className=`pill ${homed?"good":"danger"}`;
+
+  const active=turret.current_station,target=turret.target_station;
+  renderStations($("#turret-stations"),active,target);
+  renderStations($("#turret-control-stations"),active,target,true);
+  $("#turret-tools").textContent=`T${active??0} / T${target??0}`;
+  $("#turret-confirmed").textContent=turret.software_position_known?turret.mechanically_confirmed?"Mechanically confirmed":"Software position known":"Unconfirmed";
+  $("#turret-state").textContent=turret.last_error||"Idle";
+  $("#turret-control-status").textContent=turret.target_station?"Moving":turret.last_error||"Idle";
+  $("#turret-sensor").textContent=turret.sensor_configured?"Installed":"Not installed";
+  $("#turret-warning").hidden=!!turret.sensor_configured;
+  const cuttingTools=data.assets?.cutting_tools||[];
+  for(const tool of cuttingTools){
+    const row=$(`#tool-table tr[data-tool="${Number(tool.station)}"]`);if(!row)continue;
+    const values={gx:tool.geometry_x_mm,gz:tool.geometry_z_mm,wx:tool.wear_x_mm,wz:tool.wear_z_mm,nr:tool.nose_radius_mm,o:tool.orientation};
+    for(const [field,value] of Object.entries(values)){
+      const input=row.querySelector(`[data-field="${field}"]`);
+      if(input&&document.activeElement!==input&&value!==null&&value!==undefined)input.value=value;
+    }
+  }
+
+  const encoderReady=!!encoder.configured;
+  $("#encoder-state").textContent=encoderReady?"Configured":"Not commissioned";
+  $("#encoder-state").className=`pill ${encoderReady?"good":"danger"}`;
+  $("#encoder-rpm").textContent=spindle.measured_rpm===null?"—":number(spindle.measured_rpm);
+  $("#encoder-phase").textContent=`${encoder.has_index?"Index seen":"No index"} / ${number(encoder.angular_position_revolution)}`;
+  $("#encoder-freshness").textContent=encoder.fault?"Fault":encoder.stale?"Stale":encoderReady?"Current":"Unavailable";
+  $("#threading").textContent="Disabled";
+  $("#spindle-command").textContent=`${number(spindle.commanded_rpm,"0")} RPM / ${spindle.state||"OFF"}`;
+  $("#spindle-measured").textContent=encoderReady?`${number(spindle.measured_rpm)} RPM`:"Not commissioned";
+  $("#spindle-mode").textContent=spindle.speed_mode||"FIXED_RPM";
+  $("#c-position").textContent=encoder.has_angular_position?number(c.machine):"Unavailable";
+  $("#c-capability").textContent=encoderReady?"Encoder configured; controller health remains authoritative":"Angular positioning not commissioned";
+
+  const owner=String(spindle.mode||"IDLE").toUpperCase();
+  $("#chuck-owner").textContent=`Owner: ${owner}`;$("#spindle-owner").textContent=owner;
+  $$(".mode-switch button").forEach(button=>button.classList.toggle("active",button.dataset.mode.toUpperCase()===owner));
+  const cMode=/C.?POSITION/.test(owner);
+  $("#spindle-motion-panel").hidden=cMode;$("#c-motion-panel").hidden=!cMode;
+
+  const commanded=Number(spindle.commanded_rpm)||0,measured=spindle.measured_rpm;
+  $("#gauge-rpm").textContent=Math.round(measured??commanded);
+  $("#gauge-direction").textContent=spindle.state||"OFF";
+  $("#rpm-gauge").style.setProperty("--rpm-pct",`${Math.min(75,Math.max(0,commanded/10000*75))}%`);
+  $("#control-commanded-rpm").textContent=Math.round(commanded);
+  $("#control-measured-rpm").textContent=measured===null?"—":Math.round(measured);
+  $("#control-encoder-state").textContent=encoderReady?encoder.fault?"Fault":encoder.stale?"Stale":"Ready":"Not commissioned";
+  state.cReady=encoderReady&&encoder.has_angular_position;
+  updateCControls();
+  $("#connection-dot").className="dot online";$("#connection-label").textContent="Controller online";
+  $("#diag-telemetry").textContent=`Sequence ${data.sequence??"—"} / current`;
+  $("#raw-reports").textContent=JSON.stringify(data,null,2);
 }
 
-function updateControlState(){
-  $$("[data-control]").forEach(e=>e.disabled=!state.safe);
-  $$('[data-control="jog"][data-axis="C"]').forEach(e=>e.disabled=!state.safe||!state.cReady);
-  $$('[data-control="spindle"]').forEach(e=>e.disabled=!state.safe||!state.spindleReady);
-  $$('[data-control="spindle-stop"]').forEach(e=>e.disabled=!state.fresh);
-  $("#control-disabled-reason").textContent=state.safe?"Server safety gates remain authoritative.":"Controls require fresh Idle state, empty planner, spindle off, chuck/turret idle, and no pending action.";
+function updateCControls(){
+  const reason=state.cReady?"C-axis feedback is available.":"C positioning requires commissioned angular feedback.";
+  $("#c-disabled-reason").textContent=reason;
+  $$('[data-control="jog"][data-axis="C"]').forEach(button=>{
+    button.dataset.serverDisabled=String(!state.cReady);
+    button.disabled=state.locked||!state.cReady;
+  });
 }
 
 async function refreshStatus(){
   try{
-    const [lathe,chuck,telemetry]=await Promise.all([command("[ESP421]"),command("[ESP426]").catch(e=>`error=${e.message}`),command("[ESP425]")]);
-    state.latheRaw=lathe;state.chuckRaw=chuck;renderLathe(lathe,chuck,telemetry);
-    $("#connection-dot").className="dot online";$("#connection-label").textContent="Controller online";
-    $("#raw-reports").textContent=`[ESP421]\n${lathe}\n\n[ESP426]\n${chuck}\n\n[ESP425]\n${telemetry}`;
+    const telemetry=await jsonFetch("/api/v1/lathe/status");
+    renderTelemetry(telemetry);
   }catch(error){
-    state.fresh=false;state.safe=false;updateControlState();
+    state.fresh=false;
     $("#connection-dot").className="dot offline";$("#connection-label").textContent="Controller unavailable";
-    $("#machine-state").textContent="Stale";
+    $("#machine-state").textContent="Stale";$("#diag-telemetry").textContent="Stale";
   }
 }
 
-async function confirmAction(title,message){
-  const dialog=$("#confirm-dialog");$("#confirm-title").textContent=title;$("#confirm-message").textContent=message;
-  if(!dialog.showModal)return confirm(message);
-  dialog.showModal();return new Promise(resolve=>dialog.addEventListener("close",()=>resolve(dialog.returnValue==="confirm"),{once:true}));
+async function typedAction(type,body={}){
+  try{
+    await textFetch(`/api/v1/lathe/${type}`,{
+      method:"POST",headers:writeHeaders({"Content-Type":"application/json"}),body:JSON.stringify(body)
+    });
+    showToast(`${type.replace("-"," ")} accepted`,"success",2500);
+    setTimeout(refreshStatus,200);
+  }catch(error){showToast(error.message,"error",7000);}
 }
 
-document.addEventListener("click",async event=>{
+document.addEventListener("click",event=>{
   const button=event.target.closest("[data-control]");if(!button||button.disabled)return;
   const type=button.dataset.control;
-  let body={};
-  if(type==="jog")body={axis:button.dataset.axis,direction:Number(button.dataset.direction),increment:Number($("#jog-increment").value),feed:Number($("#jog-feed").value)};
-  if(type==="spindle")body={direction:button.dataset.direction,rpm:Number($("#spindle-rpm").value)};
-  if(type==="turret")body={tool:Number(button.dataset.tool)};
-  if(type==="chuck")body={mode:button.dataset.mode};
-  const message=type==="turret"?`Select T${body.tool}? The command will not repeat automatically.`:`Send guarded ${type} request?`;
-  if(!await confirmAction("Confirm lathe action",message))return;
-  try{await textFetch(`/api/v1/lathe/${type}`,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken()},body:JSON.stringify(body)});}catch(error){alert(error.message);}
+  if(type==="jog"){
+    const axis=button.dataset.axis;
+    typedAction("jog",{axis,direction:Number(button.dataset.direction),increment:axis==="C"?Number($("#c-increment").value):state.jogIncrement,feed:axis==="C"?Number($("#c-feed").value):Number($("#jog-feed").value)});
+  }else if(type==="home"){
+    typedAction("home",{axis:button.dataset.axis});
+  }else if(type==="spindle"){
+    typedAction("spindle",{direction:button.dataset.direction,rpm:Number($("#spindle-rpm").value)});
+  }else if(type==="spindle-stop"||type==="jog-cancel"){
+    typedAction(type);
+  }else if(type==="turret"){
+    typedAction("turret",{tool:Number(button.dataset.tool)});
+  }else if(type==="chuck"){
+    typedAction("chuck",{mode:button.dataset.mode});
+  }
 });
-$("#confirm-station").onclick=async()=>{
-  const tool=prompt("Enter the visually inspected physical station (1–5):");if(!/^[1-5]$/.test(tool||""))return;
-  if(!await confirmAction("Confirm physical station",`I visually inspected the turret and confirm it is physically locked at T${tool}.`))return;
-  try{await textFetch("/api/v1/lathe/turret/confirm",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken()},body:JSON.stringify({tool:Number(tool),visual_inspection:true})});}catch(error){alert(error.message);}
+
+$("#jog-increments").onclick=event=>{
+  const button=event.target.closest("[data-increment]");if(!button)return;
+  state.jogIncrement=Number(button.dataset.increment);
+  $$("#jog-increments button").forEach(item=>item.classList.toggle("active",item===button));
+};
+$("#spindle-rpm").oninput=event=>{$("#spindle-slider").value=Math.min(5000,Number(event.target.value)||0);};
+$("#spindle-slider").oninput=event=>{$("#spindle-rpm").value=event.target.value;};
+$("#set-physical-station").onclick=()=>typedAction("turret/confirm",{tool:Number($("#physical-station").value),visual_inspection:true});
+
+function toolRows(){
+  $("#tool-table").innerHTML=[1,2,3,4,5].map(tool=>`<tr data-tool="${tool}"><td>T${tool}${tool===5?" / probe":""}</td>${["gx","gz","wx","wz","nr","o"].map(field=>`<td><input data-field="${field}" type="number" step="0.001" value="0"></td>`).join("")}<td><button data-save-tool="${tool}" data-write>Save</button></td></tr>`).join("");
+  updateLockUi();
+}
+$("#tool-table").onclick=event=>{
+  const button=event.target.closest("[data-save-tool]");if(!button||button.disabled)return;
+  const row=button.closest("tr"),tool=Number(button.dataset.saveTool);
+  const value=name=>Number(row.querySelector(`[data-field="${name}"]`).value||0);
+  typedAction("tool",{tool,geometry_x:value("gx"),geometry_z:value("gz"),wear_x:value("wx"),wear_z:value("wz"),nose_radius:value("nr"),orientation:value("o")});
+};
+$("#apply-touch-off").onclick=()=>{
+  const axis=$("#touch-axis").value;
+  typedAction("touch-off",{tool:Number($("#touch-tool").value),axis,machine:Number($("#touch-machine").value),reference:Number($("#touch-reference").value),mode:axis==="X"?$("#touch-mode").value:"radius"});
+};
+$("#refresh-tools").onclick=refreshStatus;
+
+function settingInput(item,index){
+  const type=String(item.T||item.type||"S"),value=item.V??item.value??"";
+  if(item.W===0||item.W===false||type==="P"){
+    return `<code class="readonly-setting">${esc(value)}</code>`;
+  }
+  const options=item.O||item.options;
+  if(Array.isArray(options)&&options.length){
+    return `<select data-setting-input="${index}">${options.map(option=>{
+      const entry=option&&typeof option==="object"?Object.entries(option)[0]:null;
+      const optionValue=option?.value??option?.id??option?.V??entry?.[1]??option;
+      const optionName=option?.name??option?.label??option?.id??entry?.[0]??optionValue;
+      return `<option value="${esc(optionValue)}"${String(optionValue)===String(value)?" selected":""}>${esc(optionName)}</option>`;
+    }).join("")}</select>`;
+  }
+  if(type==="B"){
+    return `<select data-setting-input="${index}"><option value="false"${/^(0|false)$/i.test(String(value))?" selected":""}>False</option><option value="true"${/^(1|true)$/i.test(String(value))?" selected":""}>True</option></select>`;
+  }
+  if(type==="I"||type==="R"){
+    return `<input data-setting-input="${index}" type="number" value="${esc(value)}"${item.M!==undefined?` min="${esc(item.M)}"`:""}${item.S!==undefined?` max="${esc(item.S)}"`:""} step="${type==="I"?"1":"any"}">`;
+  }
+  return `<input data-setting-input="${index}" type="text" value="${esc(value)}"${item.S!==undefined?` maxlength="${esc(item.S)}"`:""}>`;
+}
+function renderSettings(){
+  const query=$("#settings-search").value.trim().toLowerCase();
+  const filtered=state.settings.map((item,index)=>({item,index})).filter(({item})=>{
+    const category=item.F||item.category||"";
+    const text=`${item.H||item.label||""} ${item.P||item.path||""}`.toLowerCase();
+    return category===state.settingsTab&&(!query||text.includes(query));
+  });
+  $("#settings-summary").textContent=`${filtered.length} ${state.settingsTab==="Flash/Settings"?"flash settings":"configuration items"}`;
+  $("#settings-body").innerHTML=filtered.map(({item,index})=>{
+    const path=item.P||item.path||"",label=item.H||item.label||path;
+    const writable=!(item.W===0||item.W===false||String(item.T)==="P");
+    return `<tr><td>${esc(label)}<span class="setting-path">${esc(path)}</span></td><td>${settingInput(item,index)}</td><td>${writable?`<button data-setting-set="${index}" data-write>Set</button>`:'<span class="readonly-badge">YAML</span>'}</td></tr>`;
+  }).join("")||'<tr><td colspan="3">No matching settings.</td></tr>';
+  updateLockUi();
+}
+async function refreshSettings(){
+  $("#settings-summary").textContent="Loading FluidNC setting metadata…";
+  try{
+    const result=await jsonFetch("/api/v1/settings");
+    state.settings=Array.isArray(result.data)?result.data:[];
+    renderSettings();
+  }catch(error){$("#settings-summary").textContent=error.message;showToast(error.message,"error");}
+}
+$$("[data-settings-tab]").forEach(button=>button.onclick=()=>{
+  state.settingsTab=button.dataset.settingsTab;
+  $$("[data-settings-tab]").forEach(item=>item.classList.toggle("active",item===button));
+  renderSettings();
+});
+$("#settings-search").oninput=renderSettings;$("#refresh-settings").onclick=refreshSettings;
+$("#settings-body").onclick=async event=>{
+  const button=event.target.closest("[data-setting-set]");if(!button||button.disabled)return;
+  const index=Number(button.dataset.settingSet),item=state.settings[index],input=$(`[data-setting-input="${index}"]`);
+  try{
+    await textFetch("/api/v1/settings",{method:"PUT",headers:writeHeaders({"Content-Type":"application/json"}),body:JSON.stringify({path:String(item.P||item.path),type:String(item.T||item.type||"S"),value:String(input.value)})});
+    showToast(`${item.H||item.P} updated`,"success");await refreshSettings();
+  }catch(error){showToast(error.message,"error",7000);}
 };
 
-function csrfToken(){return sessionStorage.getItem("tams-csrf")||"";}
 function renderValidation(target,result){
   const labels=["signature","hash","product","board","hardware_role","compatibility","version"];
   target.innerHTML=labels.map(name=>`<span class="check ${result?.[name]===true?"pass":result?.[name]===false?"fail":""}">${esc(name.replace("_"," "))}: ${result?.[name]===true?"valid":result?.[name]===false?"invalid":"pending"}</span>`).join("");
@@ -191,134 +336,158 @@ function renderValidation(target,result){
 function parseEnvelope(buffer){
   const bytes=new Uint8Array(buffer),view=new DataView(buffer);
   if(bytes.length<24)throw new Error("Truncated .tamsfw header");
-  const magic=String.fromCharCode(...bytes.slice(0,7));if(magic!=="TAMSFW1")throw new Error("Wrong package magic");
+  if(String.fromCharCode(...bytes.slice(0,7))!=="TAMSFW1")throw new Error("Wrong package magic");
   if(view.getUint16(8,true)!==1||view.getUint16(10,true)!==0)throw new Error("Unsupported package version or flags");
-  const ml=view.getUint32(12,true),sl=view.getUint32(16,true),il=view.getUint32(20,true);
-  if(!ml||ml>4096||!sl||sl>128||!il||24+ml+sl+il!==bytes.length)throw new Error("Invalid package lengths");
-  const raw=bytes.slice(24,24+ml),manifest=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(raw));
-  return {manifest,manifestBytes:raw,signature:bytes.slice(24+ml,24+ml+sl),imageOffset:24+ml+sl,imageLength:il,buffer};
+  const manifestLength=view.getUint32(12,true),signatureLength=view.getUint32(16,true),imageLength=view.getUint32(20,true);
+  if(!manifestLength||manifestLength>4096||!signatureLength||signatureLength>128||!imageLength||24+manifestLength+signatureLength+imageLength!==bytes.length)throw new Error("Invalid package lengths");
+  const manifestBytes=bytes.slice(24,24+manifestLength);
+  const manifest=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(manifestBytes));
+  return {manifest,manifestBytes,imageOffset:24+manifestLength+signatureLength,imageLength,buffer};
 }
 async function selectPackage(kind,file){
-  const target=$(`#${kind}-validation`),button=$(`#update-${kind}`);
+  const target=$(`#${kind}-validation`);
   try{
-    const parsed=parseEnvelope(await file.arrayBuffer());
-    state.package[kind]=parsed;renderValidation(target,{hash:null,signature:null,product:parsed.manifest.product==="fluiddial"||kind==="controller",board:null,hardware_role:null,compatibility:null,version:null});
-    const response=await fetch("/api/v1/firmware/packages/validate",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/octet-stream","X-CSRF-Token":csrfToken(),"X-TAMS-Target":kind},body:file});
-    const result=await response.json();renderValidation(target,result.validation);parsed.validation=result;
-    button.disabled=!(result.valid&&result.safe&&result.target_exact);
+    const parsed=parseEnvelope(await file.arrayBuffer());state.package[kind]=parsed;
+    renderValidation(target,{product:parsed.manifest.product===(kind==="dial"?"fluiddial":"fluidnc")});
+    const response=await fetch("/api/v1/firmware/packages/validate",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/octet-stream","X-CSRF-Token":state.csrf,"X-TAMS-Target":kind},body:file});
+    const text=await response.text(),result=extractJson(text);if(!response.ok)throw new Error(result.error||result.reason||"Package validation failed");
+    parsed.validation=result;renderValidation(target,result.validation);
     $(`#${kind==="dial"?"dial-update-reason":"firmware-safety"}`).textContent=result.reason||"Package and target validated.";
-  }catch(error){state.package[kind]=null;button.disabled=true;target.innerHTML=`<span class="check fail">${esc(error.message)}</span>`;}
+    updateFirmwareButtons();
+  }catch(error){state.package[kind]=null;target.innerHTML=`<span class="check fail">${esc(error.message)}</span>`;updateFirmwareButtons();}
 }
-$("#dial-package").onchange=e=>e.target.files[0]&&selectPackage("dial",e.target.files[0]);
-$("#controller-package").onchange=e=>e.target.files[0]&&selectPackage("controller",e.target.files[0]);
+$("#dial-package").onchange=event=>event.target.files[0]&&selectPackage("dial",event.target.files[0]);
+$("#controller-package").onchange=event=>event.target.files[0]&&selectPackage("controller",event.target.files[0]);
 
+function updateFirmwareButtons(){
+  const data=state.firmware||{},dial=data.m5dial||{},dialValidation=state.package.dial?.validation,controllerValidation=state.package.controller?.validation;
+  const dialDisabled=state.locked||!(dialValidation?.valid&&dialValidation?.target_exact&&data.safe&&data.trust_configured&&dial.paired&&dial.online&&!dial.ambiguous&&!data.maintenance_lock);
+  const controllerDisabled=state.locked||!(controllerValidation?.valid&&data.safe&&data.trust_configured&&!data.maintenance_lock);
+  $("#update-dial").dataset.serverDisabled=String(dialDisabled&&!state.locked);$("#update-dial").disabled=dialDisabled;
+  $("#update-controller").dataset.serverDisabled=String(controllerDisabled&&!state.locked);$("#update-controller").disabled=controllerDisabled;
+  $("#pair-dial").disabled=state.locked||!!(dial.paired&&dial.online);
+}
 async function refreshFirmware(){
-  renderValidation($("#dial-validation"));renderValidation($("#controller-validation"));
   try{
     const data=await jsonFetch("/api/v1/firmware/devices");state.firmware=data;
-    if(data.csrf_token)sessionStorage.setItem("tams-csrf",data.csrf_token);
-    const c=data.controller||{},d=data.m5dial||{};
-    $("#controller-id").textContent=c.device_id||"—";$("#controller-version").textContent=c.version||"—";$("#controller-slot").textContent=c.inactive_partition||"—";
-    $("#dial-online").textContent=d.online?"Online":d.paired?"Offline":"Not paired";$("#dial-online").className=`pill ${d.online?"good":""}`;
-    $("#dial-id").textContent=d.device_id||"Not paired";$("#dial-fingerprint").textContent=d.fingerprint||"—";$("#dial-address").textContent=d.ip?`${d.ip} / ${d.hardware_role||"—"}`:"—";$("#dial-version").textContent=d.version||"—";
-    $("#pair-dial").disabled=!!(d.paired&&d.online);$("#pair-dial").textContent=d.paired?"Paired":"Pair M5Dial";
-    $("#pair-status").textContent=d.error||d.health||(d.paired?"Paired identity is stored.":"Open the OTA scene on the M5Dial to create a physical pairing window.");
-    const passwordReady=data.admin_password_hardened!==false;
-    $("#firmware-safety").textContent=!passwordReady?"Updates and typed controls disabled: replace the default administrator password.":data.safe?`Machine safe for maintenance: ${data.safety_reason||"Idle"}`:`Updates disabled: ${data.safety_reason||"unsafe or stale machine state"}`;
-    const dialValidated=state.package.dial?.validation;
-    $("#update-dial").disabled=!(passwordReady&&dialValidated?.valid&&dialValidated?.target_exact&&data.safe&&data.trust_configured&&d.paired&&d.online&&!d.ambiguous&&!data.maintenance_lock);
-    const controllerValidated=state.package.controller?.validation;
-    $("#update-controller").disabled=!(passwordReady&&controllerValidated?.valid&&data.safe&&data.trust_configured&&!data.maintenance_lock);
-    if(!data.trust_configured)$("#dial-update-reason").textContent="Updates disabled: production signing trust is not configured in this build.";
-    try{
-      const receipts=await jsonFetch("/api/v1/firmware/receipts");
-      const controllerReceipt=receipts.find(receipt=>receipt.target==="fluidnc_controller");
-      const dialReceipt=receipts.find(receipt=>receipt.target==="m5dial");
-      if(controllerReceipt)$("#last-controller-receipt").textContent=JSON.stringify(controllerReceipt,null,2);
-      if(dialReceipt)$("#last-dial-receipt").textContent=JSON.stringify(dialReceipt,null,2);
-    }catch(_){}
+    const controller=data.controller||{},dial=data.m5dial||{};
+    $("#controller-id").textContent=controller.device_id||"—";$("#controller-version").textContent=controller.version||"—";$("#controller-slot").textContent=controller.inactive_partition||"—";
+    $("#dial-online").textContent=dial.online?"Online":dial.paired?"Offline":"Not paired";$("#dial-online").className=`pill ${dial.online?"good":""}`;
+    $("#dial-id").textContent=dial.device_id||"Not paired";$("#dial-fingerprint").textContent=dial.fingerprint||"—";$("#dial-address").textContent=dial.ip?`${dial.ip} / ${dial.hardware_role||"—"}`:"—";$("#dial-version").textContent=dial.version||"—";
+    $("#pair-dial").textContent=dial.paired?"Paired":"Pair M5Dial";
+    $("#pair-status").textContent=dial.error||dial.health||(dial.paired?"Paired identity is stored.":"Pairing can be started while FluidDial is running normally.");
+    $("#firmware-safety").textContent=data.safe?`Machine ready for firmware maintenance: ${data.safety_reason||"Idle"}`:`Updates disabled: ${data.safety_reason||"machine is active"}`;
+    $("#diag-maintenance").textContent=data.maintenance_lock?"Active":"Inactive";
+    if(!data.trust_configured)$("#dial-update-reason").textContent="Production signing trust is not configured.";
+    updateFirmwareButtons();
+    const receipts=await jsonFetch("/api/v1/firmware/receipts").catch(()=>[]);
+    const controllerReceipt=receipts.find(receipt=>receipt.target==="fluidnc_controller"),dialReceipt=receipts.find(receipt=>receipt.target==="m5dial");
+    if(controllerReceipt)$("#last-controller-receipt").textContent=JSON.stringify(controllerReceipt,null,2);
+    if(dialReceipt)$("#last-dial-receipt").textContent=JSON.stringify(dialReceipt,null,2);
   }catch(error){$("#firmware-safety").textContent=`Firmware service unavailable: ${error.message}`;}
 }
 
 async function deploy(kind){
-  const pkg=state.package[kind];if(!pkg)return;
-  if(!await confirmAction(`Update ${kind==="dial"?"M5Dial":"FluidNC"}`,`Install signed version ${pkg.manifest.version}? Machine commands remain locked for the deployment.`))return;
+  const pkg=state.package[kind];if(!pkg||state.locked)return;
   const progress=$(`#${kind}-progress`),stages=["Validation","Transfer","Target verification","Image verification","Reboot","Reconnect","Health","Receipt"];
-  progress.innerHTML=stages.map(s=>`<li>${s}</li>`).join("");
+  progress.innerHTML=stages.map(stage=>`<li>${stage}</li>`).join("");
   let deploymentId="";
   try{
-    const start=await jsonFetch("/api/v1/firmware/deployments",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken()},body:JSON.stringify({target:kind,package_id:pkg.manifest.package_id,manifest_sha256:pkg.validation.manifest_sha256})});
+    const start=await jsonFetch("/api/v1/firmware/deployments",{method:"POST",headers:writeHeaders({"Content-Type":"application/json"}),body:JSON.stringify({target:kind,package_id:pkg.manifest.package_id,manifest_sha256:pkg.validation.manifest_sha256})});
     deploymentId=start.deployment_id;
     const image=new Uint8Array(pkg.buffer,pkg.imageOffset,pkg.imageLength),chunkSize=start.chunk_size||4096;
     for(let offset=0;offset<image.length;offset+=chunkSize){
       progress.children[1].className="active";
-      const chunk=image.slice(offset,Math.min(offset+chunkSize,image.length));
-      await textFetch(`/api/v1/firmware/deployments/${encodeURIComponent(start.deployment_id)}/chunks?offset=${offset}`,{method:"PUT",headers:{"Content-Type":"application/octet-stream","X-CSRF-Token":csrfToken()},body:chunk});
+      await textFetch(`/api/v1/firmware/deployments/${encodeURIComponent(deploymentId)}/chunks?offset=${offset}`,{method:"PUT",headers:writeHeaders({"Content-Type":"application/octet-stream"}),body:image.slice(offset,Math.min(offset+chunkSize,image.length))});
     }
-    await jsonFetch(`/api/v1/firmware/deployments/${encodeURIComponent(start.deployment_id)}/commit`,{method:"POST",headers:{"X-CSRF-Token":csrfToken()}});
+    await jsonFetch(`/api/v1/firmware/deployments/${encodeURIComponent(deploymentId)}/commit`,{method:"POST",headers:writeHeaders()});
     for(let tries=0;tries<90;tries++){
-      await new Promise(r=>setTimeout(r,1000));
-      const status=await jsonFetch(`/api/v1/firmware/deployments/${encodeURIComponent(start.deployment_id)}`);
-      stages.forEach((_,i)=>progress.children[i].className=i<status.stage_index?"done":i===status.stage_index?"active":"");
-      if(status.terminal){
-        if(!status.success)throw new Error(status.error||"Deployment failed");
-        if(status.receipt_persisted===false)throw new Error("Firmware verified, but the deployment receipt could not be persisted.");
-        break;
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      const deployment=await jsonFetch(`/api/v1/firmware/deployments/${encodeURIComponent(deploymentId)}`);
+      stages.forEach((_,index)=>progress.children[index].className=index<deployment.stage_index?"done":index===deployment.stage_index?"active":"");
+      if(deployment.terminal){
+        if(!deployment.success)throw new Error(deployment.error||"Deployment failed");
+        if(deployment.receipt_persisted===false)throw new Error("Firmware verified, but its receipt was not persisted.");
+        showToast(`${kind==="dial"?"M5Dial":"FluidNC"} update complete`,"success",8000);break;
       }
     }
     await refreshFirmware();
   }catch(error){
-    if(deploymentId){try{await jsonFetch(`/api/v1/firmware/deployments/${encodeURIComponent(deploymentId)}/abort`,{method:"POST",headers:{"X-CSRF-Token":csrfToken()}});}catch(_){}}
-    progress.insertAdjacentHTML("beforeend",`<li class="fail">${esc(error.message)}</li>`);
+    if(deploymentId)await jsonFetch(`/api/v1/firmware/deployments/${encodeURIComponent(deploymentId)}/abort`,{method:"POST",headers:writeHeaders()}).catch(()=>{});
+    progress.insertAdjacentHTML("beforeend",`<li class="fail">${esc(error.message)}</li>`);showToast(error.message,"error",9000);
   }
 }
 $("#update-dial").onclick=()=>deploy("dial");$("#update-controller").onclick=()=>deploy("controller");
 
 $("#pair-dial").onclick=async()=>{
-  const status=$("#pair-status");
+  if(state.locked)return;
+  const status=$("#pair-status"),code=$("#pair-code");
   try{
-    const started=await jsonFetch("/api/v1/firmware/pair/start",{method:"POST",headers:{"X-CSRF-Token":csrfToken()}});
-    status.textContent=`Comparison code ${started.comparison_code}. Verify it on both screens.`;
-    if(!await confirmAction("Pair exact M5Dial",`Verify code ${started.comparison_code} on the M5Dial. Continue only if both screens match.`))return;
+    const started=await jsonFetch("/api/v1/firmware/pair/start",{method:"POST",headers:writeHeaders()});
+    code.hidden=false;code.textContent=started.comparison_code;
+    status.textContent="Compare this code on the M5Dial, then press the center dial button.";
     const body=new URLSearchParams({comparison_code:started.comparison_code});
-    await jsonFetch("/api/v1/firmware/pair/confirm",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":csrfToken()},body});
-    status.textContent="Press green on the M5Dial to physically confirm pairing.";
+    await jsonFetch("/api/v1/firmware/pair/confirm",{method:"POST",headers:writeHeaders({"Content-Type":"application/x-www-form-urlencoded"}),body});
     for(let tries=0;tries<60;tries++){
-      await new Promise(r=>setTimeout(r,1000));
+      await new Promise(resolve=>setTimeout(resolve,1000));
       const result=await jsonFetch("/api/v1/firmware/pair/status");
-      if(result.paired){status.textContent="Cryptographic pairing complete.";await refreshFirmware();return;}
+      if(result.paired){status.textContent="Cryptographic pairing complete.";code.hidden=true;showToast("M5Dial paired","success");await refreshFirmware();return;}
     }
     throw new Error("Physical pairing window expired.");
-  }catch(error){status.textContent=`Pairing failed: ${error.message}`;}
+  }catch(error){status.textContent=`Pairing failed: ${error.message}`;showToast(error.message,"error");}
 };
 
-function toolRows(){
-  $("#tool-table").innerHTML=[1,2,3,4,5].map(t=>`<tr data-tool="${t}"><td>T${t}${t===5?" / probe":""}</td>${["gx","gz","wx","wz","nr","o"].map(k=>`<td><input data-field="${k}" type="number" step="0.001"></td>`).join("")}<td><button data-save-tool="${t}">Save</button> <button data-touch-tool="${t}">Touch-off</button></td></tr>`).join("");
+function renderFiles(data){
+  const files=Array.isArray(data.files)?data.files:[];
+  $("#file-list").innerHTML=files.map(file=>`<div class="file-entry"><button data-open-file="${esc(file.name)}">${esc(file.name)}</button><small>${Number(file.size)<0?"folder":`${file.size} B`}</small><a class="text-link" href="/${encodeURI(file.name)}" download>Download</a></div>`).join("")||"<p>No files found.</p>";
+  $("#file-space").textContent=`${data.used||"—"} used of ${data.total||"—"} (${data.occupation??"—"}%) — ${data.status||"Ok"}`;
 }
-$("#refresh-tools").onclick=async()=>{try{const raw=await command("[ESP421]");$("#raw-reports").textContent=raw;}catch(e){alert(e.message);}};
-$("#tool-table").onclick=async event=>{
-  const save=event.target.closest("[data-save-tool]"),touch=event.target.closest("[data-touch-tool]");if(!save&&!touch)return;
-  const tool=Number((save||touch).dataset.saveTool||(save||touch).dataset.touchTool),row=event.target.closest("tr");
+async function refreshFiles(){
+  try{renderFiles(await jsonFetch("/files?action=list&path=/"));}catch(error){$("#file-list").textContent=error.message;}
+}
+async function openFile(name){
   try{
-    if(save){
-      const value=name=>Number(row.querySelector(`[data-field="${name}"]`).value||0);
-      const body={tool,geometry_x:value("gx"),geometry_z:value("gz"),wear_x:value("wx"),wear_z:value("wz"),nose_radius:value("nr"),orientation:value("o")};
-      if(!await confirmAction(`Save T${tool}`,`Write the entered T${tool} geometry and wear values using guarded ESP422 semantics?`))return;
-      await textFetch("/api/v1/lathe/tool",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken()},body:JSON.stringify(body)});
-    }else{
-      const axis=(prompt("Touch-off axis: X or Z","Z")||"").toUpperCase();if(!/^[XZ]$/.test(axis))return;
-      const machine=Number(prompt(`Current machine ${axis} coordinate (mm):`));const reference=Number(prompt(`Known ${axis} reference coordinate (mm):`));
-      if(!Number.isFinite(machine)||!Number.isFinite(reference))return;
-      const mode=axis==="X"?(prompt("X interpretation: diameter or radius","diameter")||"").toLowerCase():"radius";
-      if(!["diameter","radius"].includes(mode))return;
-      if(!await confirmAction(`Touch off T${tool} ${axis}`,`Write ${axis} offset from machine ${machine} to reference ${reference}. This does not run a probe cycle.`))return;
-      await textFetch("/api/v1/lathe/touch-off",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken()},body:JSON.stringify({tool,axis,machine,reference,mode})});
-    }
-  }catch(error){alert(error.message);}
+    const text=await textFetch(`/${encodeURI(name)}`);
+    state.currentFile=name;$("#editor-name").value=name;$("#file-editor").value=text;
+    $("#editor-title").textContent=name;$("#editor-state").textContent="Loaded from DLC32";
+    $("#download-file").disabled=false;$("#delete-file").disabled=state.locked;
+  }catch(error){showToast(error.message,"error");}
+}
+$("#file-list").onclick=event=>{const button=event.target.closest("[data-open-file]");if(button)openFile(button.dataset.openFile);};
+$("#file-editor").oninput=()=>{$("#editor-state").textContent="Unsaved browser edits";};
+async function uploadNamedFile(name,blob){
+  const form=new FormData();form.append("file",blob,name);form.append(`${name}S`,String(blob.size));
+  await textFetch("/files",{method:"POST",headers:writeHeaders(),body:form});
+}
+$("#file-upload").onchange=async event=>{
+  const file=event.target.files[0];if(!file||state.locked)return;
+  try{await uploadNamedFile(file.name,file);showToast(`${file.name} uploaded`,"success");await refreshFiles();}catch(error){showToast(error.message,"error");}
 };
-$("#refresh-diagnostics").onclick=()=>refreshStatus();
-$("#refresh-files").onclick=async()=>{try{$("#files-output").textContent=await textFetch("/files?action=list&path=/");}catch(e){$("#files-output").textContent=e.message;}};
-$("#legacy-command-form").onsubmit=async e=>{e.preventDefault();try{$("#legacy-output").textContent=await command($("#legacy-command").value);}catch(error){$("#legacy-output").textContent=error.message;}};
+$("#save-file").onclick=async()=>{
+  const name=$("#editor-name").value.trim().replace(/^\/+/,"");
+  if(!name||state.locked)return;
+  try{await uploadNamedFile(name,new Blob([$("#file-editor").value],{type:"text/plain"}));state.currentFile=name;$("#editor-state").textContent="Saved on DLC32";showToast(`${name} saved to DLC32`,"success");await refreshFiles();}catch(error){showToast(error.message,"error");}
+};
+$("#download-file").onclick=()=>{
+  const name=$("#editor-name").value.trim();if(!name)return;
+  const link=document.createElement("a");link.href=`/${encodeURI(name)}`;link.download=name;link.click();
+};
+$("#delete-file").onclick=async()=>{
+  const name=state.currentFile||$("#editor-name").value.trim();if(!name||state.locked)return;
+  try{
+    await jsonFetch(`/files?action=delete&path=/&filename=${encodeURIComponent(name)}`,{headers:writeHeaders()});
+    state.currentFile="";$("#editor-name").value="";$("#file-editor").value="";$("#editor-title").textContent="File Editor";$("#editor-state").textContent="No file open";$("#download-file").disabled=true;$("#delete-file").disabled=true;
+    showToast(`${name} deleted`,"success");await refreshFiles();
+  }catch(error){showToast(error.message,"error");}
+};
+$("#refresh-files").onclick=refreshFiles;
+
+$("#refresh-diagnostics").onclick=refreshStatus;
 
 toolRows();renderStations($("#turret-stations"));renderStations($("#turret-control-stations"),null,null,true);
-refreshAuth();refreshStatus();refreshFirmware();setInterval(refreshStatus,1500);setInterval(refreshFirmware,5000);
+(async()=>{
+  await initializeConsole();
+  await Promise.all([refreshStatus(),refreshFirmware()]);
+  setInterval(refreshStatus,1500);
+  setInterval(refreshFirmware,5000);
+})();
