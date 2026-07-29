@@ -657,6 +657,70 @@ namespace WebUI {
         return true;
     }
 
+    bool DialFirmwareClient::issueDiagnosticGrant(const std::string& path,
+                                                  DialDiagnosticGrant& grant) {
+        if (path != "/api/v1/diagnostics/link" &&
+            path != "/api/v1/diagnostics/screen.bmp") {
+            _state.lastError = "unsupported M5Dial diagnostic resource";
+            return false;
+        }
+        if (!exactTargetOnline()) return false;
+
+        std::string nonce;
+        uint32_t counter = 0;
+        if (!requestChallenge(0, nonce, counter)) return false;
+        const std::string manifestDigest(64, '0');
+        const std::string bodyDigest = sha256Hex(std::string());
+        const std::string canonical =
+            "GET\n" + path + "\n" + _state.deviceId + "\n" + nonce + "\n" +
+            std::to_string(counter) + "\n" + manifestDigest + "\n" + bodyDigest;
+        uint8_t proof[32];
+        hmac(_pairSecret, canonical, proof);
+
+        grant.ip                 = _state.ip;
+        grant.path               = path;
+        grant.target             = _state.deviceId;
+        grant.nonce              = nonce;
+        grant.manifestDigest     = manifestDigest;
+        grant.bodyDigest         = bodyDigest;
+        grant.authorization      = hex(proof, sizeof(proof));
+        grant.counter            = counter;
+        grant.expiresMs          = millis() + 30000U;
+        _diagnosticNonce         = nonce;
+        _diagnosticCounter       = counter;
+        _diagnosticExpiresMs     = grant.expiresMs;
+        _diagnosticPending       = true;
+        secureZero(proof, sizeof(proof));
+        return true;
+    }
+
+    bool DialFirmwareClient::verifyDiagnosticResponse(
+        const std::string& nonce,
+        uint32_t counter,
+        int status,
+        const std::string& bodyDigest,
+        const std::string& responseAuthorization) {
+        if (nonce.size() != 32 || !counter || status < 100 || status > 599 ||
+            bodyDigest.size() != 64 || responseAuthorization.size() != 64) {
+            return false;
+        }
+        if (!_diagnosticPending || nonce != _diagnosticNonce ||
+            counter != _diagnosticCounter ||
+            static_cast<int32_t>(_diagnosticExpiresMs - millis()) <= 0) {
+            return false;
+        }
+        // A grant is single-use even if the response proof is invalid.
+        _diagnosticPending = false;
+        const std::string canonical =
+            "response\n" + nonce + "\n" + std::to_string(counter) + "\n" +
+            std::to_string(status) + "\n" + bodyDigest;
+        uint8_t expected[32];
+        hmac(_pairSecret, canonical, expected);
+        const bool valid = constantHexEquals(responseAuthorization, expected);
+        secureZero(expected, sizeof(expected));
+        return valid;
+    }
+
     std::string DialFirmwareClient::stateJson() const {
         return "{\"paired\":" + std::string(_state.paired ? "true" : "false") +
                ",\"online\":" + (_state.online ? "true" : "false") +

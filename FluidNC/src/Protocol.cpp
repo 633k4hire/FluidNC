@@ -8,6 +8,7 @@
 */
 
 #include "Protocol.h"
+#include "LatheDiagnostics.h"
 #ifdef ENABLE_AUTHENTICATION
 #    include "WebUI/WebUIServer.h"
 #endif
@@ -393,6 +394,7 @@ void protocol_main_loop() {
             {
                 status_code = execute_line(activeLine, *out_channel, AuthenticationLevel::LEVEL_GUEST);
             }
+            LatheDiagnostics::recordLine(activeChannel->name(), activeLine, status_code);
 
             // Tell the channel that the line has been processed.
             // If the line was aborted, the channel could be invalid

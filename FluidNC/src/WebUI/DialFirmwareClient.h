@@ -45,6 +45,18 @@ namespace WebUI {
         std::string result;
     };
 
+    struct DialDiagnosticGrant {
+        std::string ip;
+        std::string path;
+        std::string target;
+        std::string nonce;
+        std::string manifestDigest;
+        std::string bodyDigest;
+        std::string authorization;
+        uint32_t    counter   = 0;
+        uint32_t    expiresMs = 0;
+    };
+
     class DialFirmwareClient {
     public:
         static DialFirmwareClient& instance();
@@ -64,6 +76,12 @@ namespace WebUI {
         bool commitDeployment();
         bool abortDeployment();
         bool refreshHealth();
+        bool issueDiagnosticGrant(const std::string& path, DialDiagnosticGrant& grant);
+        bool verifyDiagnosticResponse(const std::string& nonce,
+                                      uint32_t counter,
+                                      int status,
+                                      const std::string& bodyDigest,
+                                      const std::string& responseAuthorization);
         void expireDeployment(const char* reason);
         void setReceiptPersisted(bool persisted) { _deployment.receiptPersisted = persisted; }
 
@@ -99,6 +117,10 @@ namespace WebUI {
         std::string _pendingFingerprint;
         std::string _pendingIp;
         std::string _pendingCode;
+        std::string _diagnosticNonce;
+        uint32_t    _diagnosticCounter   = 0;
+        uint32_t    _diagnosticExpiresMs = 0;
+        bool        _diagnosticPending   = false;
         bool        _initialized = false;
         bool        _lastDiscoveryOk = false;
         uint32_t    _lastDiscoveryAt = 0;

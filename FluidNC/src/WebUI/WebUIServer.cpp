@@ -28,6 +28,7 @@
 #include "Planner.h"
 #include "GCode.h"
 #include "Lathe.h"
+#include "LatheDiagnostics.h"
 #include "Report.h"
 #include "ToolChangers/maijker_turret.h"
 #include "FluidPath.h"
@@ -911,6 +912,13 @@ namespace WebUI {
         _webserver->on("/api/v1/console/lock", HTTP_POST, handleConsoleLock);
         _webserver->on("/api/v1/settings", HTTP_GET, handleSettingsApi);
         _webserver->on("/api/v1/settings", HTTP_PUT, handleSettingsApi, nullptr, LatheApiBody);
+        _webserver->on("/api/v1/diagnostics/controller", HTTP_GET, handleDiagnosticsApi);
+        _webserver->on("/api/v1/diagnostics/m5/grant", HTTP_GET, handleDiagnosticsApi);
+        _webserver->on("/api/v1/diagnostics/m5/verify",
+                       HTTP_POST,
+                       handleDiagnosticsApi,
+                       nullptr,
+                       LatheApiBody);
         _webserver->on("/api/v1/firmware/devices", HTTP_GET, handleFirmwareDevices);
         _webserver->on("/api/v1/firmware/packages/validate",
                        HTTP_POST,
@@ -1640,6 +1648,112 @@ namespace WebUI {
         std::string command = "[ESP401]P=" + path + " T=" + type + " V=" + value;
         // ESP401 applies the setting's own type, range, and state policy.
         synchronousCommand(request, command.c_str(), true, AuthenticationLevel::LEVEL_ADMIN, true);
+    }
+
+    void WebUI_Server::handleDiagnosticsApi(AsyncWebServerRequest* request) {
+        auto* body = static_cast<FirmwareRequestBody*>(request->_tempObject);
+        auto cleanup = [&]() {
+            delete body;
+            request->_tempObject = nullptr;
+        };
+        if (!Lathe::enabled()) {
+            cleanup();
+            request->send(404,
+                          "application/json",
+                          "{\"error\":\"lathe diagnostics are not active for this configuration\"}");
+            return;
+        }
+
+        const std::string url = request->url().c_str();
+        if (request->method() == HTTP_GET &&
+            url == "/api/v1/diagnostics/controller") {
+            cleanup();
+            sendJSON(request, 200, LatheDiagnostics::snapshotJson());
+            return;
+        }
+
+        auto& dial = DialFirmwareClient::instance();
+        if (request->method() == HTTP_GET &&
+            url == "/api/v1/diagnostics/m5/grant") {
+            cleanup();
+            const std::string resource =
+                request->hasParam("resource")
+                    ? request->getParam("resource")->value().c_str()
+                    : "";
+            const std::string path =
+                resource == "link"
+                    ? "/api/v1/diagnostics/link"
+                    : resource == "screen"
+                          ? "/api/v1/diagnostics/screen.bmp"
+                          : "";
+            DialDiagnosticGrant grant;
+            if (path.empty() || !dial.issueDiagnosticGrant(path, grant)) {
+                sendJSON(request,
+                         path.empty() ? 422 : 503,
+                         "{\"error\":\"" +
+                             jsonEscape(path.empty()
+                                            ? "resource must be link or screen"
+                                            : dial.state().lastError) +
+                             "\"}");
+                return;
+            }
+            sendJSON(
+                request,
+                200,
+                "{\"ip\":\"" + jsonEscape(grant.ip) + "\",\"path\":\"" +
+                    jsonEscape(grant.path) + "\",\"target\":\"" +
+                    jsonEscape(grant.target) + "\",\"nonce\":\"" +
+                    jsonEscape(grant.nonce) + "\",\"counter\":" +
+                    std::to_string(grant.counter) + ",\"manifest_sha256\":\"" +
+                    jsonEscape(grant.manifestDigest) + "\",\"body_sha256\":\"" +
+                    jsonEscape(grant.bodyDigest) + "\",\"authorization\":\"" +
+                    jsonEscape(grant.authorization) + "\",\"expires_ms\":" +
+                    std::to_string(grant.expiresMs) + "}");
+            return;
+        }
+
+        if (request->method() == HTTP_POST &&
+            url == "/api/v1/diagnostics/m5/verify") {
+            if (!body || body->overflow || body->bytes.size() != body->expected) {
+                cleanup();
+                request->send(400,
+                              "application/json",
+                              "{\"error\":\"a bounded JSON body is required\"}");
+                return;
+            }
+            const std::string json = bodyString(body);
+            cleanup();
+            double counterValue = 0;
+            double statusValue = 0;
+            const std::string nonce = bodyJsonString(json, "nonce");
+            const std::string digest = bodyJsonString(json, "body_sha256");
+            const std::string proof = bodyJsonString(json, "response_auth");
+            if (!bodyJsonNumber(json, "counter", counterValue) ||
+                !bodyJsonNumber(json, "status", statusValue) ||
+                counterValue < 1 || counterValue > UINT32_MAX ||
+                floor(counterValue) != counterValue ||
+                statusValue < 100 || statusValue > 599 ||
+                floor(statusValue) != statusValue) {
+                request->send(422,
+                              "application/json",
+                              "{\"error\":\"invalid diagnostic verification fields\"}");
+                return;
+            }
+            const bool valid = dial.verifyDiagnosticResponse(
+                nonce,
+                static_cast<uint32_t>(counterValue),
+                static_cast<int>(statusValue),
+                digest,
+                proof);
+            sendJSON(request,
+                     valid ? 200 : 401,
+                     valid ? "{\"valid\":true}" :
+                             "{\"valid\":false,\"error\":\"M5Dial response authentication failed\"}");
+            return;
+        }
+
+        cleanup();
+        request->send(404, "application/json", "{\"error\":\"unknown diagnostics endpoint\"}");
     }
 
     void WebUI_Server::sendAuth(AsyncWebServerRequest* request, const char* status, const char* level, const char* user) {

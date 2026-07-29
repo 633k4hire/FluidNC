@@ -103,6 +103,7 @@ namespace WebUI {
         static void        handleConsoleUnlock(AsyncWebServerRequest* request);
         static void        handleConsoleLock(AsyncWebServerRequest* request);
         static void        handleSettingsApi(AsyncWebServerRequest* request);
+        static void        handleDiagnosticsApi(AsyncWebServerRequest* request);
         static void        handle_SSDP();
         static void        handle_root(AsyncWebServerRequest* request);
         static void        handle_login(AsyncWebServerRequest* request);

@@ -23,6 +23,7 @@ namespace Stepper {
 
     // Stops stepping and disables stepper (not ISR-safe)
     void go_idle();
+    bool is_awake();
 
     // Stops stepping (ISR-safe)
     void stop_stepping();

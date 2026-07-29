@@ -2,6 +2,7 @@
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
 #include "Channel.h"
+#include "LatheDiagnostics.h"
 #include "Report.h"                 // report_gcode_modes
 #include "Machine/MachineConfig.h"  // config
 #include "RealtimeCmd.h"            // execute_realtime_command
@@ -197,6 +198,7 @@ void Channel::handleRealtimeCharacter(uint8_t ch) {
         pin_event(cmd - PinHighFirst, true);
         return;
     }
+    LatheDiagnostics::recordRealtime(name(), cmd);
     execute_realtime_command(static_cast<Cmd>(cmd), *this);
 }
 

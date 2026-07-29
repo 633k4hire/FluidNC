@@ -8,6 +8,7 @@
 */
 
 #include "Stepper.h"
+#include "LatheDiagnostics.h"
 
 #include "Machine/MachineConfig.h"
 #include "MotionControl.h"
@@ -275,6 +276,7 @@ void Stepper::wake_up() {
         return;
     }
     awake = true;
+    LatheDiagnostics::recordStepperWake();
     // Cancel any pending stepper disable
     protocol_cancel_disable_steppers();
     // Enable stepper drivers.
@@ -285,9 +287,17 @@ void Stepper::wake_up() {
 }
 
 void Stepper::go_idle() {
+    const bool wasAwake = awake;
     awake = false;
+    if (wasAwake) {
+        LatheDiagnostics::recordStepperIdle();
+    }
     stop_stepping();
     protocol_disable_steppers();
+}
+
+bool Stepper::is_awake() {
+    return awake;
 }
 
 // Reset and clear stepper subsystem variables
