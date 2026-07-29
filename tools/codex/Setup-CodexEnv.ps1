@@ -60,7 +60,7 @@ if (-not $SkipNodeInstall) {
 }
 
 if (-not $SkipPlatformIOProbe) {
-    Write-Host "Checking PlatformIO with repo-local core directory..."
+    Write-Host "Checking the approved shared PlatformIO core..."
     pio system info
 }
 

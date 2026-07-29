@@ -501,7 +501,7 @@ condition remains present.
 The telemetry firmware uses the machine-specific OTA-safe build environment:
 
 ```powershell
-$env:PLATFORMIO_CORE_DIR = 'C:\repos\FluidNC\.pio-core'
+$env:PLATFORMIO_CORE_DIR = 'C:\Users\metzg\.platformio'
 pio run -e maijker_wifi
 ```
 
