@@ -135,6 +135,7 @@ class WebUiTests(unittest.TestCase):
             "chuck",
             "tool",
             "touch-off",
+            "coordinate-system",
         ):
             self.assertIn(f"/api/v1/lathe/{route}", self.server)
         self.assertIn("consoleControlAuthorized(request)", self.server)
@@ -143,6 +144,13 @@ class WebUiTests(unittest.TestCase):
         self.assertIn('strncpy(command, "$H=XZ"', self.server)
         self.assertIn("firmware maintenance lock rejects machine-control", self.server)
         self.assertIn('Lathe::enabled() ? "index.html" : "index-legacy.html"', self.server)
+
+    def test_work_coordinates_are_explicit_and_selectable(self):
+        self.assertIn('id="coordinate-system"', self.html)
+        self.assertIn('id="apply-coordinate-system"', self.html)
+        self.assertIn('typedAction("coordinate-system"', self.html)
+        self.assertIn("G59.3", self.html)
+        self.assertIn("invalid work coordinate system", self.server)
 
     def test_typed_post_commands_enter_the_command_channel(self):
         function = self.server.split("void WebUI_Server::synchronousCommand(", 1)[1].split(

@@ -2509,6 +2509,15 @@ namespace WebUI {
                 request->send(422, "application/json", "{\"error\":\"home axis must be X, Z, or ALL\"}");
                 return;
             }
+        } else if (url == "/api/v1/lathe/coordinate-system") {
+            const std::string coordinateSystem = bodyJsonString(json, "coordinate_system");
+            if (coordinateSystem != "G54" && coordinateSystem != "G55" && coordinateSystem != "G56" &&
+                coordinateSystem != "G57" && coordinateSystem != "G58" && coordinateSystem != "G59" &&
+                coordinateSystem != "G59.1" && coordinateSystem != "G59.2" && coordinateSystem != "G59.3") {
+                request->send(422, "application/json", "{\"error\":\"invalid work coordinate system\"}");
+                return;
+            }
+            strncpy(command, coordinateSystem.c_str(), sizeof(command) - 1);
         } else if (url == "/api/v1/lathe/jog") {
             std::string axis = bodyJsonString(json, "axis");
             double direction = 0, increment = 0, feed = 0;

@@ -51,6 +51,7 @@ main{max-width:1560px;margin:0 auto;padding:1.2rem clamp(1rem,3vw,2rem) 4rem}
 .banner.warning{background:color-mix(in srgb,var(--yellow) 11%,var(--panel));border-color:color-mix(in srgb,var(--yellow) 40%,var(--line));color:var(--text)}
 dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,1.25fr);gap:.55rem;margin:0}
 dt{color:var(--muted)}dd{min-width:0;margin:0;text-align:right;overflow-wrap:anywhere}
+.inline-control{display:flex;justify-content:flex-end;gap:.4rem;align-items:center}.inline-control select{min-width:5.4rem}.inline-control button{padding:.55rem .7rem}
 .note{font-size:.8rem;line-height:1.45;color:var(--muted);margin:.9rem 0 0}.warning-text{color:var(--yellow)}
 .stations{display:grid;grid-template-columns:repeat(5,1fr);gap:.45rem;margin:.8rem 0}
 .station{aspect-ratio:1;border-radius:50%;display:grid;place-items:center;background:var(--input);border:1px solid var(--line)}

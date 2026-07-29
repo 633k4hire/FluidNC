@@ -46,12 +46,12 @@
         <article class="card dro">
           <span class="axis">X</span>
           <strong id="dro-x">—</strong>
-          <small><span id="dro-x-work">—</span> work / <span id="dro-x-mode">mode unknown</span></small>
+          <small><span id="dro-x-wcs">Work</span> / machine <span id="dro-x-work">—</span> / <span id="dro-x-mode">mode unknown</span></small>
         </article>
         <article class="card dro">
           <span class="axis">Z</span>
           <strong id="dro-z">—</strong>
-          <small><span id="dro-z-work">—</span> work coordinate</small>
+          <small><span id="dro-z-wcs">Work</span> / machine <span id="dro-z-work">—</span></small>
         </article>
         <article class="card dro">
           <span class="axis axis-c">C</span>
@@ -65,6 +65,14 @@
           <div class="card-head"><h2>Machine</h2><span id="homed" class="pill">Unhomed</span></div>
           <dl>
             <dt>Coordinate mode</dt><dd id="coordinate-mode">—</dd>
+            <dt>Work coordinates</dt>
+            <dd class="inline-control">
+              <select id="coordinate-system" aria-label="Work coordinate system">
+                <option>G54</option><option>G55</option><option>G56</option><option>G57</option><option>G58</option><option>G59</option>
+                <option>G59.1</option><option>G59.2</option><option>G59.3</option>
+              </select>
+              <button id="apply-coordinate-system" data-write>Activate</button>
+            </dd>
             <dt>Feed mode</dt><dd id="feed-mode">—</dd>
             <dt>Limits</dt><dd id="limits">—</dd>
             <dt>Alarm</dt><dd id="alarm">—</dd>

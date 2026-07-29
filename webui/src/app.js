@@ -127,13 +127,16 @@ function renderTelemetry(data){
     $$("[data-lathe]").forEach(element=>element.hidden=true);
   }
   const x=positions.x||{},z=positions.z||{},c=positions.c||{};
-  $("#dro-x").textContent=number(x.machine);$("#dro-x-work").textContent=number(x.work);
-  $("#dro-z").textContent=number(z.machine);$("#dro-z-work").textContent=number(z.work);
+  const wcs=execution.coordinate_system||"—";
+  $("#dro-x").textContent=number(x.work);$("#dro-x-work").textContent=number(x.machine);
+  $("#dro-z").textContent=number(z.work);$("#dro-z-work").textContent=number(z.machine);
+  $("#dro-x-wcs").textContent=`${wcs} work`;$("#dro-z-wcs").textContent=`${wcs} work`;
   $("#dro-c").textContent=number(c.machine);$("#c-angle").textContent=number(c.machine);
   $("#control-x-machine").textContent=number(x.machine);$("#control-x-work").textContent=`${number(x.work)} work`;
   $("#control-z-machine").textContent=number(z.machine);$("#control-z-work").textContent=`${number(z.work)} work`;
   $("#dro-x-mode").textContent=`${spindle.diameter_mode||"unknown"} mode`;
-  $("#coordinate-mode").textContent=`${execution.coordinate_system||"—"} / ${execution.distance_mode||"—"}`;
+  $("#coordinate-mode").textContent=`${wcs} work / ${execution.distance_mode||"—"}`;
+  if(document.activeElement!==$("#coordinate-system")&&wcs!=="—")$("#coordinate-system").value=wcs;
   $("#feed-mode").textContent=execution.feed_mode||"—";
   const activeLimits=[["X",x],["Z",z],["C",c]].filter(([,axis])=>axis.limit_active).map(([name])=>name);
   $("#limits").textContent=activeLimits.length?activeLimits.join(", "):"Clear";
@@ -260,6 +263,7 @@ $("#spindle-rpm").oninput=event=>{
 };
 $("#spindle-slider").oninput=event=>{$("#spindle-rpm").value=event.target.value;};
 $("#set-physical-station").onclick=()=>typedAction("turret/confirm",{tool:Number($("#physical-station").value),visual_inspection:true});
+$("#apply-coordinate-system").onclick=()=>typedAction("coordinate-system",{coordinate_system:$("#coordinate-system").value});
 
 function toolRows(){
   $("#tool-table").innerHTML=[1,2,3,4,5].map(tool=>`<tr data-tool="${tool}"><td>T${tool}${tool===5?" / probe":""}</td>${["gx","gz","wx","wz","nr","o"].map(field=>`<td><input data-field="${field}" type="number" step="0.001" value="0"></td>`).join("")}<td><button data-save-tool="${tool}" data-write>Save</button></td></tr>`).join("");
