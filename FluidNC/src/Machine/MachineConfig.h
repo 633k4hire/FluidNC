@@ -124,6 +124,7 @@ namespace Machine {
         static void load();
         static void load_file(std::string_view file);
         static void load_yaml(std::string_view yaml_string);
+        static void mark_boot_stable();
 
         ~MachineConfig();
     };

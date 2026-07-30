@@ -30,11 +30,43 @@
 #include <atomic>
 #include <memory>
 
+#ifdef ESP32
+#    include <esp_attr.h>
+#endif
+
 Machine::MachineConfig* config;
 
 // TODO FIXME: Split this file up into several files, perhaps put it in some folder and namespace Machine?
 
 namespace Machine {
+    struct PanicBootGuard {
+        uint32_t magic;
+        uint32_t attempts;
+    };
+
+    static constexpr uint32_t PANIC_BOOT_GUARD_MAGIC = 0x584A4150;
+#ifdef ESP32
+    static RTC_NOINIT_ATTR PanicBootGuard panicBootGuard;
+#else
+    static PanicBootGuard panicBootGuard {};
+#endif
+
+    static bool panic_requires_default_config() {
+        if (!restart_was_panic()) {
+            panicBootGuard = { PANIC_BOOT_GUARD_MAGIC, 0 };
+            return false;
+        }
+        if (panicBootGuard.magic != PANIC_BOOT_GUARD_MAGIC) {
+            panicBootGuard = { PANIC_BOOT_GUARD_MAGIC, 0 };
+        }
+        ++panicBootGuard.attempts;
+        return panicBootGuard.attempts >= 2;
+    }
+
+    void MachineConfig::mark_boot_stable() {
+        panicBootGuard = { PANIC_BOOT_GUARD_MAGIC, 0 };
+    }
+
     void MachineConfig::group(Configuration::HandlerBase& handler) {
         handler.item("board", _board);
         handler.item("name", _name);
@@ -179,10 +211,9 @@ namespace Machine {
     const char defaultConfig[] = "name: Default (Test Drive)\nboard: None\n";
 
     void MachineConfig::load() {
-        // If the system crashes we skip the config file and use the default
-        // builtin config.  This helps prevent reset loops on bad config files.
-        if (restart_was_panic()) {
-            log_error("Skipping configuration file due to panic");
+        const bool panicked = restart_was_panic();
+        const bool fallback = panic_requires_default_config();
+        if (panicked) {
             backtrace_t bt;
             if (backtrace_get(&bt)) {
                 char buf[16];
@@ -196,10 +227,19 @@ namespace Machine {
                 }
                 log_error(btLine.c_str());
             }
+        }
+        if (fallback) {
+            // Retry the configured machine once after a panic. If that boot
+            // also panics before setup finishes, use the builtin config to
+            // break a genuine bad-configuration reset loop.
+            log_error("Skipping configuration file after repeated panic");
             log_info("Using default configuration");
             load_yaml(defaultConfig);
             set_state(State::ConfigAlarm);
         } else {
+            if (panicked) {
+                log_warn("Retrying configuration file once after panic");
+            }
             load_file(config_filename->get());
         }
     }

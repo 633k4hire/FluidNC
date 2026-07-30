@@ -32,6 +32,7 @@ void setup() {
     platform_preinit();
 
     set_state(State::Starting);
+    bool machine_initialized = false;
 
     try {
         timing_init();
@@ -154,6 +155,7 @@ void setup() {
         }
 
         make_proxies();
+        machine_initialized = true;
 
     } catch (std::exception& ex) {
         // Log exception:
@@ -165,6 +167,9 @@ void setup() {
     allChannels.ready();
     allChannels.deregistration(&startupLog);
     protocol_send_event(&startEvent);
+    if (machine_initialized) {
+        Machine::MachineConfig::mark_boot_stable();
+    }
 }
 
 void loop() {
