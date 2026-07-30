@@ -32,7 +32,11 @@ void JSONencoder::flush() {
 }
 void JSONencoder::add(char c) {
     _linebuf += c;
-    if (_channel && _linebuf.length() >= 100) {
+    // Callback encoders used to retain the complete document until end().
+    // Large telemetry snapshots could therefore require two simultaneous
+    // dynamically-sized strings: this buffer and the callback destination.
+    // Flush callbacks in small chunks so _linebuf stays bounded.
+    if ((_callback && _linebuf.length() >= 64) || (_channel && _linebuf.length() >= 100)) {
         flush();
     }
 }

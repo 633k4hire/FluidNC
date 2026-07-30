@@ -33,9 +33,11 @@
 #include <iomanip>
 #include <cstdlib>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
 
 #include "Module.h"
 
@@ -340,7 +342,17 @@ namespace WebUI {
         }
 
         static Error showTamsTelemetryJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP425
+            constexpr size_t MaxTelemetryBytes = 8192;
             static uint64_t sequence = 0;
+            static std::mutex telemetry_mutex;
+            static std::array<char, MaxTelemetryBytes + 1> telemetry_buffer;
+
+            // ESP425 can be requested by the wired M5Dial and the web task at
+            // the same time. Use one fixed buffer so idle polling cannot
+            // fragment the heap or terminate FluidNC on a large allocation.
+            std::lock_guard<std::mutex> telemetry_guard(telemetry_mutex);
+            size_t payload_size = 0;
+            bool payload_overflow = false;
 
             float machine_position[MAX_N_AXIS] = {};
             float work_offset[MAX_N_AXIS]      = {};
@@ -378,8 +390,18 @@ namespace WebUI {
             bool estop_active     = false;
             control_pin_state("estop_pin", estop_configured, estop_active);
 
-            std::string payload;
-            JSONencoder j([&payload](const char* fragment) { payload += fragment; });
+            JSONencoder j([&](const char* fragment) {
+                for (const char* cursor = fragment; *cursor != '\0'; ++cursor) {
+                    if (*cursor == '\r' || *cursor == '\n') {
+                        continue;
+                    }
+                    if (payload_size < MaxTelemetryBytes) {
+                        telemetry_buffer[payload_size++] = *cursor;
+                    } else {
+                        payload_overflow = true;
+                    }
+                }
+            });
             j.begin();
             j.member("schema", "tams.fluidnc.telemetry.v1");
             json_number(j, "sequence", ++sequence);
@@ -663,14 +685,12 @@ namespace WebUI {
             j.end_array();
             j.end();
 
-            payload.erase(std::remove(payload.begin(), payload.end(), '\r'), payload.end());
-            payload.erase(std::remove(payload.begin(), payload.end(), '\n'), payload.end());
-            constexpr size_t MaxTelemetryBytes = 8192;
-            if (payload.size() > MaxTelemetryBytes) {
+            if (payload_overflow) {
                 log_string(out, "{\"schema\":\"tams.fluidnc.telemetry.v1\",\"error\":\"snapshot_too_large\"}");
                 return Error::InvalidValue;
             }
-            log_string(out, payload);
+            telemetry_buffer[payload_size] = '\0';
+            log_string(out, telemetry_buffer.data());
             return Error::Ok;
         }
 
