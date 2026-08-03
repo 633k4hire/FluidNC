@@ -13,7 +13,8 @@ CONFIG_PATHS = (
 
 
 def main() -> None:
-    payloads = {path: path.read_bytes() for path in CONFIG_PATHS}
+    # Text mode normalizes CRLF/LF so validation works on Windows and CI.
+    payloads = {path: path.read_text(encoding="utf-8") for path in CONFIG_PATHS}
     canonical = payloads[CONFIG_PATHS[0]]
 
     mismatches = [str(path.relative_to(ROOT)) for path, data in payloads.items() if data != canonical]
@@ -24,14 +25,26 @@ def main() -> None:
         )
 
     required = (
-        b"board: MKS-DLC32 V2.1\n",
-        b"name: XZACt_MiniLathe\n",
-        b"  shared_chuck: true\n",
-        b"  station_count: 5\n",
+        "board: MKS-DLC32 V2.1\n",
+        "name: XZACt_MiniLathe\n",
+        "  shared_chuck: true\n",
+        "  station_count: 5\n",
     )
-    missing = [value.decode().strip() for value in required if value not in canonical]
+    missing = [value.strip() for value in required if value not in canonical]
     if missing:
         raise SystemExit("Maijker configuration is missing required deployment values: " + ", ".join(missing))
+
+    expected_counts = {
+        "    steps_per_mm: 640\n": 2,
+        "    steps_per_mm: 4.444444\n": 1,
+    }
+    wrong_counts = [
+        f"{value.strip()} (expected {expected}, found {canonical.count(value)})"
+        for value, expected in expected_counts.items()
+        if canonical.count(value) != expected
+    ]
+    if wrong_counts:
+        raise SystemExit("Maijker configuration has incorrect axis scaling: " + ", ".join(wrong_counts))
 
     print("Maijker LittleFS configuration aliases verified.")
 
