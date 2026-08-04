@@ -30,7 +30,8 @@ stepping:
 axes:
   shared_stepper_disable_pin: i2so.0
   x:
-    steps_per_mm: 320
+    # 200-step motor * 16 microsteps / 5 mm SFU1605 lead.
+    steps_per_mm: 640
     # Conservative jeweler-lathe commissioning profile.
     max_rate_mm_per_min: 600
     acceleration_mm_per_sec2: 25
@@ -54,7 +55,8 @@ axes:
         direction_pin: i2so.2
 
   z:
-    steps_per_mm: 320
+    # 200-step motor * 16 microsteps / 5 mm SFU1605 lead.
+    steps_per_mm: 640
     # Conservative jeweler-lathe commissioning profile.
     max_rate_mm_per_min: 600
     acceleration_mm_per_sec2: 25
@@ -77,10 +79,10 @@ axes:
         step_pin: i2so.3
         direction_pin: i2so.4
 
-  # Existing commanded spindle axis from the old build.
+  # Direct-drive NEMA23 commanded spindle axis: 200 steps * 8 microsteps / 360 degrees.
   # This is not spindle phase feedback; the lathe encoder below must be a real spindle encoder.
   c:
-    steps_per_mm: 533.333
+    steps_per_mm: 4.444444
     max_rate_mm_per_min: 2000
     acceleration_mm_per_sec2: 75
     max_travel_mm: 100000
