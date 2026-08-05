@@ -423,6 +423,9 @@ void protocol_main_loop() {
         protocol_auto_cycle_start();
         protocol_execute_realtime();  // Runtime command check point.
         sys.process_changes();
+        if (spindle) {
+            spindle->service();
+        }
 
         if (sys.abort()) {
             sys.set_abort(false);
@@ -439,7 +442,7 @@ void protocol_main_loop() {
         // negative transition using signed comparison, and across the
         // negative to positive transition using unsigned.
 
-        if (idleEndTime && (getCpuTicks() - idleEndTime) > 0) {
+        if (idleEndTime && !Stepping::continuousActive() && (getCpuTicks() - idleEndTime) > 0) {
             idleEndTime = 0;  //
             Axes::set_disable(true, false);
         }
@@ -926,6 +929,12 @@ static void protocol_do_cycle_start() {
 }
 
 void protocol_disable_steppers() {
+    if (Stepping::continuousActive()) {
+        // The shared C-stepper spindle still needs the common driver enable.
+        protocol_cancel_disable_steppers();
+        Axes::set_disable(false, false);
+        return;
+    }
     if (state_is(State::Homing)) {
         // Leave steppers enabled while homing
         Axes::set_disable(false, false);

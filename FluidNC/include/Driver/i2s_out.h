@@ -70,6 +70,23 @@ void i2s_out_write(pinnum_t pin, uint8_t val);
  */
 void i2s_out_delay();
 
+// Optional low-rate continuous step stream overlaid on the normal I2S step
+// engine.  This is used by a shared C-axis/stepper-spindle drive so X/Z
+// planner pulses and spindle pulses still have one serialized I2S owner.
+typedef void (*i2s_out_aux_pulse_callback_t)(void);
+
+bool i2s_out_aux_step_start(pinnum_t step_pin,
+                            bool step_invert,
+                            pinnum_t dir_pin,
+                            bool dir_level,
+                            uint32_t target_rate_millihz,
+                            uint32_t acceleration_millihz_per_sec,
+                            i2s_out_aux_pulse_callback_t pulse_callback);
+void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz);
+void i2s_out_aux_step_stop(bool immediate);
+bool i2s_out_aux_step_active();
+uint32_t i2s_out_aux_step_current_rate_millihz();
+
 /*
    Reference: "ESP32 Technical Reference Manual" by Espressif Systems
      https://www.espressif.com/sites/default/files/documentation/esp32_technical_reference_manual_en.pdf

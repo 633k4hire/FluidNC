@@ -321,6 +321,94 @@ static uint32_t _pulse_data;
 static uint32_t _delay_counts = 40;
 static uint32_t _tick_divisor;
 
+// A low-rate auxiliary pulse stream can be merged into every I2S sample.
+// The normal planner still owns _pulse_data; this overlay only changes its
+// configured step bit and therefore cannot race a second peripheral/timer.
+static volatile bool     _aux_running                    = false;
+static volatile uint32_t _aux_target_rate_millihz       = 0;
+static volatile uint32_t _aux_current_rate_millihz      = 0;
+static volatile uint32_t _aux_acceleration_millihz_sec  = 0;
+static uint32_t          _aux_phase_increment            = 0;
+static uint32_t          _aux_phase                      = 0;
+static uint32_t          _aux_step_bit                   = 0;
+static bool              _aux_step_active_high           = true;
+static uint32_t          _aux_pulse_frames_remaining     = 0;
+static uint32_t          _aux_ramp_frames_remaining      = 0;
+static uint32_t          _aux_ramp_remainder             = 0;
+static i2s_out_aux_pulse_callback_t _aux_pulse_callback = NULL;
+
+static void IRAM_ATTR aux_update_phase_increment() {
+    const uint32_t frame_hz = 1000000U / i2s_frame_us;
+    _aux_phase_increment = (uint32_t)(((uint64_t)_aux_current_rate_millihz << 32) / ((uint64_t)frame_hz * 1000ULL));
+}
+
+static void IRAM_ATTR aux_update_ramp() {
+    const uint32_t frame_hz = 1000000U / i2s_frame_us;
+    // One ramp update per millisecond, rounded to at least one I2S frame.
+    const uint32_t ramp_frames = frame_hz >= 1000U ? frame_hz / 1000U : 1U;
+    _aux_ramp_frames_remaining = ramp_frames;
+
+    const uint32_t current = _aux_current_rate_millihz;
+    const uint32_t target  = _aux_target_rate_millihz;
+    if (current == target) {
+        return;
+    }
+
+    const uint64_t scaled = (uint64_t)_aux_acceleration_millihz_sec * ramp_frames + _aux_ramp_remainder;
+    uint32_t delta = (uint32_t)(scaled / frame_hz);
+    _aux_ramp_remainder = (uint32_t)(scaled % frame_hz);
+    if (delta == 0) {
+        delta = 1;
+    }
+
+    if (current < target) {
+        _aux_current_rate_millihz = target - current < delta ? target : current + delta;
+    } else {
+        _aux_current_rate_millihz = current - target < delta ? target : current - delta;
+    }
+    aux_update_phase_increment();
+
+    if (_aux_current_rate_millihz == 0 && _aux_target_rate_millihz == 0) {
+        _aux_running                = false;
+        _aux_phase                  = 0;
+        _aux_phase_increment        = 0;
+        _aux_pulse_frames_remaining = 0;
+    }
+}
+
+static uint32_t IRAM_ATTR aux_overlay_sample(uint32_t sample) {
+    if (!_aux_running) {
+        return sample;
+    }
+
+    if (_aux_ramp_frames_remaining == 0) {
+        aux_update_ramp();
+    } else {
+        --_aux_ramp_frames_remaining;
+    }
+
+    if (_aux_pulse_frames_remaining == 0 && _aux_phase_increment != 0) {
+        const uint32_t prior = _aux_phase;
+        _aux_phase += _aux_phase_increment;
+        if (_aux_phase < prior) {
+            _aux_pulse_frames_remaining = _pulse_counts;
+            if (_aux_pulse_callback) {
+                _aux_pulse_callback();
+            }
+        }
+    }
+
+    if (_aux_pulse_frames_remaining) {
+        if (_aux_step_active_high) {
+            sample |= _aux_step_bit;
+        } else {
+            sample &= ~_aux_step_bit;
+        }
+        --_aux_pulse_frames_remaining;
+    }
+    return sample;
+}
+
 static void IRAM_ATTR set_timer_ticks(uint32_t ticks) {
     if (ticks) {
         _delay_counts = ticks / _tick_divisor;
@@ -350,28 +438,46 @@ static void IRAM_ATTR i2s_isr() {
     uint32_t remaining_delay_counts = _remaining_delay_counts;
 
     int i = FIFO_RELOAD;
-    do {
-        if (remaining_pulse_counts) {
-            I2S0.fifo_wr = pulse_data;
-            --i;
-            --remaining_pulse_counts;
-        } else if (remaining_delay_counts) {
-            I2S0.fifo_wr = i2s_out_port_data;
-            --i;
-            --remaining_delay_counts;
-        } else {
-            // Set _pulse_data to the non-pulse value in case pulse_func() does nothing,
-            // which can happen if it is not awake
-            _pulse_data = i2s_out_port_data;
-
-            _pulse_func();
-
-            // Reload from variables that could have been modified by pulse_func
-            pulse_data             = _pulse_data;
-            remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
-            remaining_delay_counts = _delay_counts - remaining_pulse_counts;
-        }
-    } while (i);
+    if (!_aux_running) {
+        // Preserve FluidNC's original planner-only ISR path byte-for-byte when
+        // the spindle stream is stopped. C positioning must not pay an overlay
+        // call or branch on every I2S sample.
+        do {
+            if (remaining_pulse_counts) {
+                I2S0.fifo_wr = pulse_data;
+                --i;
+                --remaining_pulse_counts;
+            } else if (remaining_delay_counts) {
+                I2S0.fifo_wr = i2s_out_port_data;
+                --i;
+                --remaining_delay_counts;
+            } else {
+                _pulse_data = i2s_out_port_data;
+                _pulse_func();
+                pulse_data             = _pulse_data;
+                remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
+                remaining_delay_counts = _delay_counts - remaining_pulse_counts;
+            }
+        } while (i);
+    } else {
+        do {
+            if (remaining_pulse_counts) {
+                I2S0.fifo_wr = aux_overlay_sample(pulse_data);
+                --i;
+                --remaining_pulse_counts;
+            } else if (remaining_delay_counts) {
+                I2S0.fifo_wr = aux_overlay_sample(i2s_out_port_data);
+                --i;
+                --remaining_delay_counts;
+            } else {
+                _pulse_data = i2s_out_port_data;
+                _pulse_func();
+                pulse_data             = _pulse_data;
+                remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
+                remaining_delay_counts = _delay_counts - remaining_pulse_counts;
+            }
+        } while (i);
+    }
 
     // Save the counts back to the variables
     _remaining_pulse_counts = remaining_pulse_counts;
@@ -489,3 +595,57 @@ step_engine_t i2s_engine = {
 };
 // clang-format on
 REGISTER_STEP_ENGINE(I2S, &i2s_engine);
+
+bool i2s_out_aux_step_start(pinnum_t step_pin,
+                            bool step_invert,
+                            pinnum_t dir_pin,
+                            bool dir_level,
+                            uint32_t target_rate_millihz,
+                            uint32_t acceleration_millihz_per_sec,
+                            i2s_out_aux_pulse_callback_t pulse_callback) {
+    if (!i2s_out_initialized || step_pin >= I2S_OUT_NUM_BITS || dir_pin >= I2S_OUT_NUM_BITS || target_rate_millihz == 0) {
+        return false;
+    }
+
+    _aux_step_bit                   = 1U << step_pin;
+    _aux_step_active_high           = !step_invert;
+    _aux_pulse_callback             = pulse_callback;
+    _aux_acceleration_millihz_sec   = acceleration_millihz_per_sec ? acceleration_millihz_per_sec : target_rate_millihz;
+    _aux_target_rate_millihz        = target_rate_millihz;
+    _aux_current_rate_millihz       = 0;
+    _aux_phase                      = 0;
+    _aux_phase_increment            = 0;
+    _aux_pulse_frames_remaining     = 0;
+    _aux_ramp_frames_remaining      = 0;
+    _aux_ramp_remainder             = 0;
+
+    i2s_out_write(step_pin, step_invert ? 1 : 0);
+    i2s_out_write(dir_pin, dir_level ? 1 : 0);
+    i2s_out_delay();
+    _aux_running = true;
+    return true;
+}
+
+void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz) {
+    if (_aux_running) {
+        _aux_target_rate_millihz = target_rate_millihz;
+    }
+}
+
+void i2s_out_aux_step_stop(bool immediate) {
+    _aux_target_rate_millihz = 0;
+    if (immediate) {
+        _aux_current_rate_millihz   = 0;
+        _aux_phase_increment        = 0;
+        _aux_pulse_frames_remaining = 0;
+        _aux_running                = false;
+    }
+}
+
+bool i2s_out_aux_step_active() {
+    return _aux_running;
+}
+
+uint32_t i2s_out_aux_step_current_rate_millihz() {
+    return _aux_current_rate_millihz;
+}

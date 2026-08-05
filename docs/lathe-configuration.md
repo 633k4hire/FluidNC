@@ -34,6 +34,10 @@ lathe:
 - `shared_chuck: true` requires lathe mode and a `c_axis` distinct from the
   configured X and Z axes. Firmware then prevents simultaneous C-axis and
   spindle ownership.
+- A `CStepper` spindle uses `axes.c.steps_per_mm` only to derive physical
+  pulses/revolution. Configure its continuous `maximum_rpm` and
+  `acceleration_rpm_per_sec` independently; `axes.c.max_rate_mm_per_min`
+  remains the positioning and coordinated-thread-proof ceiling.
 - Threading should remain disabled until spindle feedback reports measured RPM, index pulse, angular position, non-stale state, and no fault.
 - `encoder_enable: true` requires `enable: true`, a valid `encoder_pulse_pin`, and `encoder_pulses_per_rev` greater than zero.
 - Threading with the built-in encoder path requires an `encoder_index_pin` so each synchronized pass can align to a known spindle revolution.
@@ -101,6 +105,11 @@ The WebUI command endpoint exposes lathe status via:
 The JSON response contains `cmd: "421"`, `status: "ok"`, and a `data` array of id/value pairs for:
 
 - lathe enable state;
+- commanded spindle state (`CLOCKWISE`/`COUNTERCLOCKWISE`/`STOPPED`/`UNKNOWN`);
+- shared-chuck ownership (`IDLE`/`C_POSITIONING`/`SPINDLE`/`UNAVAILABLE`);
+- spindle drive type, commanded/open-loop/maximum RPM, steps per revolution,
+  and whether C position is dead-reckoned;
+- configured threading enable and live threading-feedback readiness;
 - spindle speed mode (`G96`/`G97`);
 - diameter/radius mode;
 - feed mode (`G93`/`G94`/`G95`);

@@ -158,6 +158,22 @@ void IRAM_ATTR i2s_out_write(pinnum_t pin, uint8_t val) {
     i2s_out_gpio_shiftout(i2s_output_);
 }
 
+// The ESP32-S3 dedicated I2S engine does not yet support the auxiliary
+// continuous-step overlay used by the classic-ESP32 Maijker controller.
+bool i2s_out_aux_step_start(pinnum_t step_pin,
+                            bool step_invert,
+                            pinnum_t dir_pin,
+                            bool dir_level,
+                            uint32_t target_rate_millihz,
+                            uint32_t acceleration_millihz_per_sec,
+                            i2s_out_aux_pulse_callback_t pulse_callback) {
+    return false;
+}
+void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz) {}
+void i2s_out_aux_step_stop(bool immediate) {}
+bool i2s_out_aux_step_active() { return false; }
+uint32_t i2s_out_aux_step_current_rate_millihz() { return 0; }
+
 void IRAM_ATTR i2s_out_delay() {}
 
 uint8_t IRAM_ATTR i2s_out_read(pinnum_t pin) {

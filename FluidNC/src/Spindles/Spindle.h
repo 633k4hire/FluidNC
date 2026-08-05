@@ -62,6 +62,19 @@ namespace Spindles {
 
         // Used by Protocol.cpp to restore the state during a restart
         virtual void   setState(SpindleState state, uint32_t speed) = 0;
+        virtual void   setStateRpm(SpindleState state, float rpm) { setState(state, rpm <= 0.0f ? 0U : static_cast<uint32_t>(rpm)); }
+        virtual bool   canSetState(SpindleState state, float rpm, const char*& reason) const {
+            reason = nullptr;
+            return true;
+        }
+        virtual void   service() {}
+        virtual void   operatorHeartbeat() {}
+        virtual const char* driveType() const { return "GENERIC"; }
+        virtual float  commandedRpm() const { return static_cast<float>(_current_speed); }
+        virtual float  openLoopRpm() const { return commandedRpm(); }
+        virtual float  maximumRpm() { return static_cast<float>(maxSpeed()); }
+        virtual uint32_t stepsPerRevolution() const { return 0; }
+        virtual bool   positionIsDeadReckoned() const { return false; }
         SpindleState   get_state() { return _current_state; };
         void           stop() { setState(SpindleState::Disable, 0); }
         virtual void   config_message() = 0;

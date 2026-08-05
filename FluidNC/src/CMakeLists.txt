@@ -118,6 +118,7 @@ idf_component_register(SRCS BTConfig.cpp
 							Pins/VoidPinDetail.cpp
 							Spindles/10vSpindle.cpp
 							Spindles/BESCSpindle.cpp
+							Spindles/CStepperSpindle.cpp
 							Spindles/DacSpindle.cpp
 							Spindles/HBridgeSpindle.cpp
 							Spindles/LaserSpindle.cpp

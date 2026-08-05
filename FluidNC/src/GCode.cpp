@@ -1859,10 +1859,17 @@ Error gc_execute_line(const char* input_line) {
         requested_spindle_rpm = Lathe::clamp_css_rpm(
             Lathe::css_rpm_from_diameter_mm(gc_block.values.s, current_diameter, gc_block.modal.units == Units::Inches));
     }
+    const char* spindle_transition_reason = nullptr;
+    if (!spindle->canSetState(gc_block.modal.spindle, requested_spindle_rpm, spindle_transition_reason)) {
+        if (spindle_transition_reason) {
+            log_info(spindle_transition_reason);
+        }
+        return Error::GcodeValueWordInvalid;
+    }
     if ((gc_state.spindle_speed != gc_block.values.s) || syncLaser || gc_state.modal.lathe_spindle_speed_mode != next_lathe_spindle_mode) {
         if (gc_state.modal.spindle != SpindleState::Disable && !laserIsMotion && !state_is(State::CheckMode)) {
             protocol_buffer_synchronize();
-            spindle->setState(gc_state.modal.spindle, disableLaser ? 0 : (uint32_t)requested_spindle_rpm);
+            spindle->setStateRpm(gc_state.modal.spindle, disableLaser ? 0.0f : requested_spindle_rpm);
             gc_ovr_changed();
         }
         gc_state.spindle_speed = gc_block.values.s;  // Update spindle speed state.
@@ -1946,7 +1953,14 @@ Error gc_execute_line(const char* input_line) {
         // rather than gc_state, is used to manage laser state for non-laser motions.
         if (!state_is(State::CheckMode)) {
             protocol_buffer_synchronize();
-            spindle->setState(gc_block.modal.spindle, (uint32_t)pl_data->spindle_speed);
+            const char* spindle_reject_reason = nullptr;
+            if (!spindle->canSetState(gc_block.modal.spindle, gc_state.lathe_commanded_rpm, spindle_reject_reason)) {
+                if (spindle_reject_reason) {
+                    log_info(spindle_reject_reason);
+                }
+                return Error::GcodeValueWordInvalid;
+            }
+            spindle->setStateRpm(gc_block.modal.spindle, gc_state.lathe_commanded_rpm);
         }
         gc_ovr_changed();
         gc_state.modal.spindle = gc_block.modal.spindle;

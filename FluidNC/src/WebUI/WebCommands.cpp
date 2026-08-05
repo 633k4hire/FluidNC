@@ -817,6 +817,7 @@ namespace WebUI {
         }
 
         static Error showLatheStatusJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP421
+            spindle->operatorHeartbeat();
             JSONencoder j(&out);
             j.begin();
             j.member("cmd", "421");
@@ -824,6 +825,15 @@ namespace WebUI {
             j.begin_array("data");
 
             j.id_value_object("Lathe enabled", Lathe::enabled() ? "true" : "false");
+            j.id_value_object("Spindle state", spindle_state_name(spindle->get_state()));
+            j.id_value_object("Shared chuck mode", Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()));
+            j.id_value_object("Spindle drive", spindle->driveType());
+            j.id_value_object("Spindle commanded RPM", float_string(spindle->commandedRpm()));
+            j.id_value_object("Spindle open-loop RPM", float_string(spindle->openLoopRpm()));
+            j.id_value_object("Spindle maximum RPM", float_string(spindle->maximumRpm()));
+            j.id_value_object("Spindle steps/rev", int32_t(spindle->stepsPerRevolution()));
+            j.id_value_object("C position dead reckoned", spindle->positionIsDeadReckoned() ? "true" : "false");
+            j.id_value_object("Threading enabled", Lathe::feature_enabled(Lathe::Feature::Threading) ? "true" : "false");
             j.id_value_object("Spindle speed mode", lathe_spindle_mode_name());
             j.id_value_object("Diameter mode", lathe_diameter_mode_name());
             j.id_value_object("Feed mode", feed_mode_name());
@@ -861,6 +871,7 @@ namespace WebUI {
             j.id_value_object("Feedback revolution count", int32_t(feedback.revolution_count));
             j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
             j.id_value_object("Feedback fault", feedback.fault ? "true" : "false");
+            j.id_value_object("Threading feedback ready", Lathe::feedback_supports_threading(feedback) ? "true" : "false");
 
             j.end_array();
             j.end();

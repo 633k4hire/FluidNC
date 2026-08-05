@@ -160,21 +160,16 @@ maijker_5_station_turret:
   sensor_debounce_ms: 25
   home_timeout_steps: 2000
 
-HBridge:
-  pwm_hz: 5000
-  output_cw_pin: gpio.25
-  output_ccw_pin: gpio.26
-  enable_pin: gpio.27
-  disable_with_s0: true
-  s0_with_disable: true
-  spinup_ms: 1000
-  spindown_ms: 1000
-  # This is the first and only spindle definition. tool_num selects among
-  # multiple spindles; it is not the turret station count.
+CStepper:
+  # The direct-drive NEMA23 on the C/Y step and direction outputs is both the
+  # indexed C axis and the open-loop spindle. The 1600 pulses/rev scale comes
+  # from axes.c; continuous spindle speed is configured independently.
+  axis: 5
+  cw_positive: true
+  maximum_rpm: 500.0
+  acceleration_rpm_per_sec: 100.0
+  operator_watchdog_ms: 12000
   tool_num: 0
-  # Until closed-loop spindle feedback is commissioned, cap output to the
-  # estimated 25% duty that corresponds to 500 RPM on the existing 2000 RPM map.
-  speed_map: 0=0.000% 500=25.000%
   off_on_alarm: true
   atc: maijker_5_station_turret
 
@@ -212,8 +207,8 @@ lathe:
   max_css_rpm: 500.000
   x_axis: 0
   z_axis: 2
-  # The step-driven C axis and HBridge spindle turn the same physical chuck.
-  # Firmware rejects simultaneous ownership and synchronizes mode transitions.
+  # C positioning and the CStepper spindle share one step/dir driver. Firmware
+  # rejects simultaneous ownership and synchronizes mode transitions.
   shared_chuck: true
   c_axis: 5
   feedback_stale_ms: 250

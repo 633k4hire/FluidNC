@@ -2,6 +2,7 @@
 #include "EnumItem.h"
 #include "Stepping.h"
 #include "Machine/MachineConfig.h"  // config
+#include "Driver/i2s_out.h"
 
 #include <atomic>
 
@@ -93,6 +94,16 @@ void Stepping::assignMotor(axis_t axis, motor_t motor, pinnum_t step_pin, bool s
 }
 
 steps_t Stepping::axis_steps[MAX_N_AXIS] = { 0 };
+volatile axis_t Stepping::_continuousAxis = INVALID_AXIS;
+volatile bool   Stepping::_continuousPositive = true;
+AxisMask        Stepping::_previousDirectionMask = 65535;
+
+void IRAM_ATTR Stepping::continuousPulseFromISR() {
+    const axis_t axis = _continuousAxis;
+    if (axis < MAX_N_AXIS) {
+        axis_steps[axis] += _continuousPositive ? 1 : -1;
+    }
+}
 
 bool* Stepping::limit_var(axis_t axis, motor_t motor) {
     auto m = axis_motors[axis][motor];
@@ -129,16 +140,18 @@ void Stepping::unlimit(axis_t axis, motor_t motor) {
 void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
     // Set the direction pins, but optimize for the common
     // situation where the direction bits haven't changed.
-    static AxisMask previous_dir_mask = 65535;  // should never be this value
-    if (previous_dir_mask == 65535) {
+    if (_previousDirectionMask == 65535) {
         // Set all the direction bits the first time
-        previous_dir_mask = ~dir_mask;
+        _previousDirectionMask = ~dir_mask;
     }
 
-    if (dir_mask != previous_dir_mask) {
+    if (dir_mask != _previousDirectionMask) {
         for (axis_t axis = X_AXIS; axis < Axes::_numberAxis; axis++) {
+            if (axis == _continuousAxis) {
+                continue;
+            }
             bool dir     = bitnum_is_true(dir_mask, axis);
-            bool old_dir = bitnum_is_true(previous_dir_mask, axis);
+            bool old_dir = bitnum_is_true(_previousDirectionMask, axis);
             if (dir != old_dir) {
                 for (size_t motor = 0; motor < MAX_MOTORS_PER_AXIS; motor++) {
                     auto m = axis_motors[axis][motor];
@@ -150,7 +163,16 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
             // Some stepper drivers need time between changing direction and doing a pulse.
             step_engine->finish_dir();
         }
-        previous_dir_mask = dir_mask;
+        // Preserve the continuously-owned C direction bit while accepting
+        // planner direction changes for every other axis.
+        if (_continuousAxis < MAX_N_AXIS) {
+            const bool continuous_dir = bitnum_is_true(_previousDirectionMask, _continuousAxis);
+            _previousDirectionMask = dir_mask;
+            if (continuous_dir) set_bitnum(_previousDirectionMask, _continuousAxis);
+            else clear_bitnum(_previousDirectionMask, _continuousAxis);
+        } else {
+            _previousDirectionMask = dir_mask;
+        }
     }
 
     step_engine->start_step();
@@ -158,6 +180,9 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
     // Turn on step pulses for motors that are supposed to step now
     for (axis_t axis = X_AXIS; axis < Axes::_numberAxis; axis++) {
         if (bitnum_is_true(step_mask, axis)) {
+            if (axis == _continuousAxis) {
+                continue;
+            }
             auto increment = bitnum_is_true(dir_mask, axis) ? -1 : 1;
             axis_steps[axis] += increment;
             for (size_t motor = 0; motor < MAX_MOTORS_PER_AXIS; motor++) {
@@ -218,4 +243,59 @@ void Stepping::group(Configuration::HandlerBase& handler) {
 
 uint32_t Stepping::maxPulsesPerSec() {
     return step_engine->max_pulses_per_sec();
+}
+
+bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz, uint32_t acceleration_millihz_per_sec) {
+    if (step_engine == nullptr || strncmp(step_engine->name, "I2S", 3) != 0 || axis >= Axes::_numberAxis || rate_millihz == 0) {
+        return false;
+    }
+    auto motor = axis_motors[axis][0];
+    if (motor == nullptr || axis_motors[axis][1] != nullptr) {
+        return false;
+    }
+
+    // In the planner convention a clear direction bit increases position.
+    const bool dir_bit   = !positive;
+    const bool dir_level = dir_bit ^ motor->dir_invert;
+    _continuousAxis      = axis;
+    _continuousPositive  = positive;
+    if (!i2s_out_aux_step_start(motor->step_pin,
+                                motor->step_invert,
+                                motor->dir_pin,
+                                dir_level,
+                                rate_millihz,
+                                acceleration_millihz_per_sec,
+                                continuousPulseFromISR)) {
+        _continuousAxis = INVALID_AXIS;
+        return false;
+    }
+    if (_previousDirectionMask == 65535) {
+        _previousDirectionMask = direction_mask;
+    }
+    if (dir_bit) set_bitnum(_previousDirectionMask, axis);
+    else clear_bitnum(_previousDirectionMask, axis);
+    return true;
+}
+
+void Stepping::setContinuousRate(uint32_t rate_millihz) {
+    i2s_out_aux_step_set_rate(rate_millihz);
+}
+
+void Stepping::stopContinuous(bool immediate) {
+    i2s_out_aux_step_stop(immediate);
+    if (immediate || !i2s_out_aux_step_active()) {
+        _continuousAxis = INVALID_AXIS;
+    }
+}
+
+bool Stepping::continuousActive() {
+    const bool active = i2s_out_aux_step_active();
+    if (!active) {
+        _continuousAxis = INVALID_AXIS;
+    }
+    return active;
+}
+
+uint32_t Stepping::continuousRateMillihz() {
+    return i2s_out_aux_step_current_rate_millihz();
 }

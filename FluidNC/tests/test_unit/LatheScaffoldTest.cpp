@@ -1,5 +1,6 @@
 #include "../src/Lathe.h"
 #include "../src/LatheEncoder.h"
+#include "../src/Spindles/CStepperSpindleLogic.h"
 
 #include <gtest/gtest.h>
 
@@ -143,6 +144,18 @@ TEST(LatheScaffold, SharedChuckPolicyIsInertWhenFeatureIsDisabled) {
 
     EXPECT_EQ(decision.disposition, Lathe::SharedChuckDisposition::Allow);
     EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::Unavailable);
+}
+
+TEST(LatheScaffold, CStepperScaleMatchesEightMicrostepDirectDrive) {
+    EXPECT_EQ(Spindles::CStepperLogic::steps_per_revolution(4.444444f), 1600u);
+}
+
+TEST(LatheScaffold, CStepperRpmProducesExpectedPulseRates) {
+    constexpr uint32_t stepsPerRev = 1600;
+    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(0.5f, stepsPerRev), 13333u);
+    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(1.0f, stepsPerRev), 26667u);
+    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(5.0f, stepsPerRev), 133333u);
+    EXPECT_EQ(Spindles::CStepperLogic::acceleration_millihz_per_sec(100.0f, stepsPerRev), 2666667u);
 }
 
 TEST(LatheScaffold, ProgramNameIsBoundedAndStripsControlCharacters) {

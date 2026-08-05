@@ -34,6 +34,11 @@ namespace Machine {
         static void    waitDirection();  // Wait for direction delay
         static steps_t axis_steps[MAX_N_AXIS];
 
+        static volatile axis_t _continuousAxis;
+        static volatile bool   _continuousPositive;
+        static AxisMask        _previousDirectionMask;
+        static void IRAM_ATTR continuousPulseFromISR();
+
         static step_engine_t* step_engine;
 
     public:
@@ -87,6 +92,14 @@ namespace Machine {
         static void unblock(axis_t axis, motor_t motor);
 
         static uint32_t maxPulsesPerSec();
+
+        // Starts a low-rate continuous pulse stream on one configured I2S
+        // axis while the normal planner remains free to move other axes.
+        static bool startContinuous(axis_t axis, bool positive, uint32_t rate_millihz, uint32_t acceleration_millihz_per_sec);
+        static void setContinuousRate(uint32_t rate_millihz);
+        static void stopContinuous(bool immediate);
+        static bool continuousActive();
+        static uint32_t continuousRateMillihz();
 
         static AxisMask direction_mask;
 
