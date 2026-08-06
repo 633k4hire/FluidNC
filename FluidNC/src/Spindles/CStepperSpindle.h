@@ -24,6 +24,7 @@ namespace Spindles {
         float maximumRpm() override { return _maximumRpm; }
         uint32_t stepsPerRevolution() const override { return _stepsPerRevolution; }
         bool positionIsDeadReckoned() const override { return true; }
+        const char* cReferenceName() const override;
         bool use_delay_settings() const override { return false; }
         const Lathe::SpindleFeedback& latheFeedback() const override;
 
@@ -47,7 +48,9 @@ namespace Spindles {
         float    _commandedRpm       = 0.0f;
         uint32_t _lastOperatorHeartbeatMs = 0;
         bool     _positionSyncPending = false;
+        bool     _cReferenceValid     = true;
 
         void stopStream(bool immediate);
+        void establishRelativeCZero();
     };
 }

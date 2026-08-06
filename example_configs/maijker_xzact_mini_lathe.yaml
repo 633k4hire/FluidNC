@@ -101,6 +101,8 @@ i2so:
   bck_pin: gpio.16
   data_pin: gpio.21
   ws_pin: gpio.17
+  fifo_threshold: 40
+  fifo_reload: 23
 
 spi:
   miso_pin: gpio.12

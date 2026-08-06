@@ -1,6 +1,8 @@
 #include "../src/Lathe.h"
 #include "../src/LatheEncoder.h"
+#include "../src/ContinuousStepperLogic.h"
 #include "../src/Spindles/CStepperSpindleLogic.h"
+#include "Driver/i2s_frame_compositor.h"
 
 #include <gtest/gtest.h>
 
@@ -156,6 +158,46 @@ TEST(LatheScaffold, CStepperRpmProducesExpectedPulseRates) {
     EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(1.0f, stepsPerRev), 26667u);
     EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(5.0f, stepsPerRev), 133333u);
     EXPECT_EQ(Spindles::CStepperLogic::acceleration_millihz_per_sec(100.0f, stepsPerRev), 2666667u);
+}
+
+TEST(LatheScaffold, ContinuousStepperRampAdvancesOutsideTheI2sIsr) {
+    uint32_t remainder = 0;
+    const uint32_t rate = Machine::ContinuousStepperLogic::ramp_rate(
+        0, 1333333, 2666667, 500, remainder);
+
+    EXPECT_EQ(rate, 1333333u);
+    EXPECT_EQ(remainder, 500u);
+}
+
+TEST(LatheScaffold, ContinuousStepperRampPreservesFractionalProgress) {
+    uint32_t remainder = 0;
+    uint32_t rate      = 0;
+    for (int i = 0; i < 4; ++i) {
+        rate = Machine::ContinuousStepperLogic::ramp_rate(rate, 10, 333, 1, remainder);
+    }
+
+    EXPECT_EQ(rate, 1u);
+    EXPECT_EQ(remainder, 332u);
+    EXPECT_EQ(Machine::ContinuousStepperLogic::ramp_rate(rate, 0, 333, 4, remainder), 0u);
+}
+
+TEST(LatheScaffold, I2sCompositorPreservesPlannerBitsAndCountsAuxPulses) {
+    i2s_aux_frame_state_t state = { 0, 0x40000000u, 0, 2, 0x02u, 0, true };
+
+    EXPECT_EQ(i2s_aux_compose_frame(0x04u, &state), 0x04u);
+    EXPECT_EQ(i2s_aux_compose_frame(0x04u, &state), 0x04u);
+    EXPECT_EQ(i2s_aux_compose_frame(0x04u, &state), 0x04u);
+    EXPECT_EQ(i2s_aux_compose_frame(0x04u, &state), 0x06u);
+    EXPECT_EQ(i2s_aux_compose_frame(0x04u, &state), 0x06u);
+    EXPECT_EQ(i2s_aux_compose_frame(0x04u, &state), 0x04u);
+    EXPECT_EQ(state.generated_pulses, 1u);
+}
+
+TEST(LatheScaffold, I2sCompositorSupportsActiveLowStepOutputs) {
+    i2s_aux_frame_state_t state = { 0xffffffffu, 1, 0, 1, 0x08u, 0, false };
+
+    EXPECT_EQ(i2s_aux_compose_frame(0x0cu, &state), 0x04u);
+    EXPECT_EQ(state.generated_pulses, 1u);
 }
 
 TEST(LatheScaffold, ProgramNameIsBoundedAndStripsControlCharacters) {

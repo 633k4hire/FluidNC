@@ -75,6 +75,7 @@ namespace Spindles {
         virtual float  maximumRpm() { return static_cast<float>(maxSpeed()); }
         virtual uint32_t stepsPerRevolution() const { return 0; }
         virtual bool   positionIsDeadReckoned() const { return false; }
+        virtual const char* cReferenceName() const { return "UNAVAILABLE"; }
         SpindleState   get_state() { return _current_state; };
         void           stop() { setState(SpindleState::Disable, 0); }
         virtual void   config_message() = 0;

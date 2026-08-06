@@ -10,6 +10,9 @@ namespace Machine {
 
     void I2SOBus::validate() {
         Assert(_min_pulse_us == 1 || _min_pulse_us == 2 || _min_pulse_us == 4, "min_pulse_us must be 1, 2 or 4");
+        Assert(_fifoThreshold > 0 && _fifoThreshold < 64, "fifo_threshold must be between 1 and 63");
+        Assert(_fifoReload > 0 && _fifoReload < 64, "fifo_reload must be between 1 and 63");
+        Assert(_fifoThreshold + _fifoReload < 64, "fifo_threshold + fifo_reload must be less than 64");
         if (_bck.defined() || _data.defined() || _ws.defined()) {
             Assert(_bck.defined(), "I2SO BCK pin should be configured once");
             Assert(_data.defined(), "I2SO Data pin should be configured once");
@@ -22,11 +25,14 @@ namespace Machine {
         handler.item("data_pin", _data);
         handler.item("ws_pin", _ws);
         handler.item("min_pulse_us", _min_pulse_us, pulseUsValues);
+        handler.item("fifo_threshold", _fifoThreshold, 1, 63);
+        handler.item("fifo_reload", _fifoReload, 1, 63);
         handler.item("oe_pin", _oe);
     }
 
     void I2SOBus::init() {
-        log_info("I2SO BCK:" << _bck.name() << " WS:" << _ws.name() << " DATA:" << _data.name() << "Min Pulse:" << _min_pulse_us << "us");
+        log_info("I2SO BCK:" << _bck.name() << " WS:" << _ws.name() << " DATA:" << _data.name()
+                              << " Min Pulse:" << _min_pulse_us << "us FIFO:" << _fifoThreshold << "/" << _fifoReload);
 
         // Check capabilities:
         if (!_ws.capabilities().has(Pin::Capabilities::Output | Pin::Capabilities::Native)) {
@@ -48,6 +54,8 @@ namespace Machine {
         params.init_val = 0;
 
         params.min_pulse_us = _min_pulse_us;
+        params.fifo_threshold = _fifoThreshold;
+        params.fifo_reload    = _fifoReload;
 
         params.ws_drive_strength   = _ws.driveStrength();
         params.bck_drive_strength  = _bck.driveStrength();

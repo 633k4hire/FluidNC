@@ -164,15 +164,20 @@ bool i2s_out_aux_step_start(pinnum_t step_pin,
                             bool step_invert,
                             pinnum_t dir_pin,
                             bool dir_level,
-                            uint32_t target_rate_millihz,
-                            uint32_t acceleration_millihz_per_sec,
-                            i2s_out_aux_pulse_callback_t pulse_callback) {
+                            uint32_t initial_rate_millihz) {
     return false;
 }
 void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz) {}
 void i2s_out_aux_step_stop(bool immediate) {}
 bool i2s_out_aux_step_active() { return false; }
 uint32_t i2s_out_aux_step_current_rate_millihz() { return 0; }
+uint32_t i2s_out_aux_step_pulse_count() { return 0; }
+bool i2s_out_aux_step_take_fault() { return false; }
+void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
+    if (diagnostics) {
+        *diagnostics = (i2s_out_diagnostics_t){ 0 };
+    }
+}
 
 void IRAM_ATTR i2s_out_delay() {}
 

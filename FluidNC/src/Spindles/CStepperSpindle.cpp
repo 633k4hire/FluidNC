@@ -44,6 +44,7 @@ namespace Spindles {
         _current_state = SpindleState::Disable;
         _current_speed = 0;
         _commandedRpm  = 0.0f;
+        _cReferenceValid = true;
         _lastOperatorHeartbeatMs = millis();
         init_atc();
         config_message();
@@ -92,6 +93,7 @@ namespace Spindles {
 
         protocol_cancel_disable_steppers();
         Machine::Axes::set_disable(false, false);
+        _cReferenceValid = false;
         if (Machine::Stepping::continuousActive()) {
             Machine::Stepping::setContinuousRate(rateMillihz);
         } else {
@@ -118,6 +120,7 @@ namespace Spindles {
             if (!immediate) {
                 const uint32_t started = millis();
                 while (Machine::Stepping::continuousActive() && (uint32_t)(millis() - started) < 3000U) {
+                    Machine::Stepping::serviceContinuous();
                     delay_ms(5);
                 }
                 if (Machine::Stepping::continuousActive()) {
@@ -134,17 +137,23 @@ namespace Spindles {
         gc_state.lathe_commanded_rpm = 0.0f;
         Lathe::note_shared_chuck_spindle_state(SpindleState::Disable);
 
-        // The auxiliary stream counted every physical C pulse.  Make parser
-        // and planner positions agree with that dead-reckoned motor position
-        // before C positioning can be selected again.
+        // Spindle rotation is deliberately outside the planner coordinate
+        // frame. Once stopped, define that physical location as relative C0.
+        establishRelativeCZero();
+        protocol_disable_steppers();
+    }
+
+    void CStepper::establishRelativeCZero() {
         if (!inMotionState() && plan_get_current_block() == nullptr) {
+            Machine::Stepping::setSteps(static_cast<axis_t>(_axis), 0);
             plan_sync_position();
             gc_sync_position();
             _positionSyncPending = false;
+            _cReferenceValid     = true;
         } else {
             _positionSyncPending = true;
+            _cReferenceValid     = false;
         }
-        protocol_disable_steppers();
     }
 
     void IRAM_ATTR CStepper::setSpeedfromISR(uint32_t dev_speed) {
@@ -153,10 +162,15 @@ namespace Spindles {
     }
 
     void CStepper::service() {
+        if (Machine::Stepping::takeContinuousFault()) {
+            log_error(name() << " stopped: I2S FIFO underrun");
+            stopStream(true);
+            send_alarm(ExecAlarm::SpindleControl);
+            return;
+        }
+        Machine::Stepping::serviceContinuous();
         if (_positionSyncPending && !inMotionState() && plan_get_current_block() == nullptr) {
-            plan_sync_position();
-            gc_sync_position();
-            _positionSyncPending = false;
+            establishRelativeCZero();
         }
         if (_operatorWatchdogMs == 0 || !Machine::Stepping::continuousActive()) {
             return;
@@ -182,6 +196,16 @@ namespace Spindles {
         }
         return static_cast<float>(Machine::Stepping::continuousRateMillihz()) * 60.0f /
                (static_cast<float>(_stepsPerRevolution) * 1000.0f);
+    }
+
+    const char* CStepper::cReferenceName() const {
+        if (_current_state == SpindleState::Cw || _current_state == SpindleState::Ccw) {
+            return "ROTATING";
+        }
+        if (_positionSyncPending) {
+            return "PENDING_RELATIVE_ZERO";
+        }
+        return _cReferenceValid ? "RELATIVE_ZERO" : "INVALID";
     }
 
     void CStepper::config_message() {

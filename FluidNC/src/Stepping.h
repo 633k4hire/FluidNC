@@ -35,9 +35,12 @@ namespace Machine {
         static steps_t axis_steps[MAX_N_AXIS];
 
         static volatile axis_t _continuousAxis;
-        static volatile bool   _continuousPositive;
         static AxisMask        _previousDirectionMask;
-        static void IRAM_ATTR continuousPulseFromISR();
+        static uint32_t        _continuousTargetRateMillihz;
+        static uint32_t        _continuousCurrentRateMillihz;
+        static uint32_t        _continuousAccelerationMillihzPerSec;
+        static uint32_t        _continuousLastRampMs;
+        static uint32_t        _continuousRampRemainder;
 
         static step_engine_t* step_engine;
 
@@ -98,8 +101,10 @@ namespace Machine {
         static bool startContinuous(axis_t axis, bool positive, uint32_t rate_millihz, uint32_t acceleration_millihz_per_sec);
         static void setContinuousRate(uint32_t rate_millihz);
         static void stopContinuous(bool immediate);
+        static void serviceContinuous();
         static bool continuousActive();
         static uint32_t continuousRateMillihz();
+        static bool takeContinuousFault();
 
         static AxisMask direction_mask;
 

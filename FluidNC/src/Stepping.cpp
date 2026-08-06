@@ -3,8 +3,7 @@
 #include "Stepping.h"
 #include "Machine/MachineConfig.h"  // config
 #include "Driver/i2s_out.h"
-
-#include <atomic>
+#include "ContinuousStepperLogic.h"
 
 step_engine_t* step_engines = NULL;  // Linked list of stepping engines
 
@@ -95,15 +94,12 @@ void Stepping::assignMotor(axis_t axis, motor_t motor, pinnum_t step_pin, bool s
 
 steps_t Stepping::axis_steps[MAX_N_AXIS] = { 0 };
 volatile axis_t Stepping::_continuousAxis = INVALID_AXIS;
-volatile bool   Stepping::_continuousPositive = true;
 AxisMask        Stepping::_previousDirectionMask = 65535;
-
-void IRAM_ATTR Stepping::continuousPulseFromISR() {
-    const axis_t axis = _continuousAxis;
-    if (axis < MAX_N_AXIS) {
-        axis_steps[axis] += _continuousPositive ? 1 : -1;
-    }
-}
+uint32_t        Stepping::_continuousTargetRateMillihz = 0;
+uint32_t        Stepping::_continuousCurrentRateMillihz = 0;
+uint32_t        Stepping::_continuousAccelerationMillihzPerSec = 0;
+uint32_t        Stepping::_continuousLastRampMs = 0;
+uint32_t        Stepping::_continuousRampRemainder = 0;
 
 bool* Stepping::limit_var(axis_t axis, motor_t motor) {
     auto m = axis_motors[axis][motor];
@@ -258,15 +254,19 @@ bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz
     const bool dir_bit   = !positive;
     const bool dir_level = dir_bit ^ motor->dir_invert;
     _continuousAxis      = axis;
-    _continuousPositive  = positive;
+    _continuousTargetRateMillihz       = rate_millihz;
+    _continuousCurrentRateMillihz      = 0;
+    _continuousAccelerationMillihzPerSec = acceleration_millihz_per_sec ? acceleration_millihz_per_sec : rate_millihz;
+    _continuousLastRampMs              = millis();
+    _continuousRampRemainder           = 0;
     if (!i2s_out_aux_step_start(motor->step_pin,
                                 motor->step_invert,
                                 motor->dir_pin,
                                 dir_level,
-                                rate_millihz,
-                                acceleration_millihz_per_sec,
-                                continuousPulseFromISR)) {
+                                0)) {
         _continuousAxis = INVALID_AXIS;
+        _continuousTargetRateMillihz = 0;
+        _continuousAccelerationMillihzPerSec = 0;
         return false;
     }
     if (_previousDirectionMask == 65535) {
@@ -278,12 +278,59 @@ bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz
 }
 
 void Stepping::setContinuousRate(uint32_t rate_millihz) {
-    i2s_out_aux_step_set_rate(rate_millihz);
+    _continuousTargetRateMillihz = rate_millihz;
 }
 
 void Stepping::stopContinuous(bool immediate) {
-    i2s_out_aux_step_stop(immediate);
-    if (immediate || !i2s_out_aux_step_active()) {
+    _continuousTargetRateMillihz = 0;
+    if (immediate) {
+        i2s_out_aux_step_set_rate(0);
+        i2s_out_aux_step_stop(true);
+        _continuousCurrentRateMillihz = 0;
+        _continuousAccelerationMillihzPerSec = 0;
+        _continuousRampRemainder = 0;
+        _continuousAxis = INVALID_AXIS;
+        return;
+    }
+    serviceContinuous();
+}
+
+void Stepping::serviceContinuous() {
+    if (_continuousAxis >= MAX_N_AXIS) {
+        return;
+    }
+
+    if (!i2s_out_aux_step_active()) {
+        _continuousTargetRateMillihz = 0;
+        _continuousCurrentRateMillihz = 0;
+        _continuousAccelerationMillihzPerSec = 0;
+        _continuousRampRemainder = 0;
+        _continuousAxis = INVALID_AXIS;
+        return;
+    }
+
+    const uint32_t now        = millis();
+    const uint32_t elapsed_ms = now - _continuousLastRampMs;
+    if (elapsed_ms == 0) {
+        return;
+    }
+    _continuousLastRampMs = now;
+
+    const uint32_t next_rate = ContinuousStepperLogic::ramp_rate(
+        _continuousCurrentRateMillihz,
+        _continuousTargetRateMillihz,
+        _continuousAccelerationMillihzPerSec,
+        elapsed_ms,
+        _continuousRampRemainder);
+    if (next_rate != _continuousCurrentRateMillihz) {
+        _continuousCurrentRateMillihz = next_rate;
+        i2s_out_aux_step_set_rate(next_rate);
+    }
+
+    if (_continuousTargetRateMillihz == 0 && _continuousCurrentRateMillihz == 0) {
+        i2s_out_aux_step_stop(true);
+        _continuousAccelerationMillihzPerSec = 0;
+        _continuousRampRemainder = 0;
         _continuousAxis = INVALID_AXIS;
     }
 }
@@ -291,11 +338,19 @@ void Stepping::stopContinuous(bool immediate) {
 bool Stepping::continuousActive() {
     const bool active = i2s_out_aux_step_active();
     if (!active) {
+        _continuousTargetRateMillihz = 0;
+        _continuousCurrentRateMillihz = 0;
+        _continuousAccelerationMillihzPerSec = 0;
+        _continuousRampRemainder = 0;
         _continuousAxis = INVALID_AXIS;
     }
     return active;
 }
 
 uint32_t Stepping::continuousRateMillihz() {
-    return i2s_out_aux_step_current_rate_millihz();
+    return _continuousCurrentRateMillihz;
+}
+
+bool Stepping::takeContinuousFault() {
+    return i2s_out_aux_step_take_fault();
 }

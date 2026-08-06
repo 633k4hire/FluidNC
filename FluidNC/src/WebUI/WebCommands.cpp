@@ -26,6 +26,7 @@
 #include "Machine/Homing.h"
 #include "Spindles/Spindle.h"
 #include "ToolChangers/maijker_turret.h"
+#include "Driver/i2s_out.h"
 
 #include <Esp.h>
 
@@ -833,6 +834,26 @@ namespace WebUI {
             j.id_value_object("Spindle maximum RPM", float_string(spindle->maximumRpm()));
             j.id_value_object("Spindle steps/rev", int32_t(spindle->stepsPerRevolution()));
             j.id_value_object("C position dead reckoned", spindle->positionIsDeadReckoned() ? "true" : "false");
+            i2s_out_diagnostics_t i2s_diagnostics = {};
+            i2s_out_get_diagnostics(&i2s_diagnostics);
+            const auto shared_chuck_mode = Lathe::shared_chuck_mode();
+            const char* c_pulse_ownership = i2s_diagnostics.aux_faulted
+                                                ? "FAULT"
+                                                : shared_chuck_mode == Lathe::SharedChuckMode::Spindle
+                                                      ? "SPINDLE"
+                                                      : strcmp(spindle->cReferenceName(), "PENDING_RELATIVE_ZERO") == 0
+                                                            ? "TRANSITION"
+                                                            : "POSITIONING";
+            j.id_value_object("I2S FIFO threshold", int32_t(i2s_diagnostics.fifo_threshold));
+            j.id_value_object("I2S FIFO reload", int32_t(i2s_diagnostics.fifo_reload));
+            j.id_value_object("I2S underruns", int32_t(i2s_diagnostics.underruns));
+            j.id_value_object("I2S max ISR gap us", int32_t(i2s_diagnostics.max_isr_gap_us));
+            j.id_value_object("I2S max ISR duration us", int32_t(i2s_diagnostics.max_isr_duration_us));
+            j.id_value_object("C pulse requested Hz", float_string(i2s_diagnostics.requested_rate_millihz / 1000.0f));
+            j.id_value_object("C pulse emitted Hz", float_string(i2s_diagnostics.emitted_rate_millihz / 1000.0f));
+            j.id_value_object("C pulse emitted count", int32_t(i2s_diagnostics.emitted_pulses));
+            j.id_value_object("C pulse ownership", c_pulse_ownership);
+            j.id_value_object("C reference", spindle->cReferenceName());
             j.id_value_object("Threading enabled", Lathe::feature_enabled(Lathe::Feature::Threading) ? "true" : "false");
             j.id_value_object("Spindle speed mode", lathe_spindle_mode_name());
             j.id_value_object("Diameter mode", lathe_diameter_mode_name());
