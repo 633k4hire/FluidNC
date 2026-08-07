@@ -54,7 +54,7 @@ namespace Spindles {
         uint32_t _accelerationMillihzPerSec = 0;
         uint32_t _decelerationMillihzPerSec = 0;
         float    _minimumRpm         = 50.0f;
-        float    _maximumRpm         = 500.0f;
+        float    _maximumRpm         = 675.0f;
         float    _accelerationRpmPerSec = 1500.0f;
         float    _decelerationRpmPerSec = 100.0f;
         float    _commandedRpm       = 0.0f;

@@ -47,10 +47,10 @@ def main() -> None:
         raise SystemExit("Maijker configuration has incorrect axis scaling: " + ", ".join(wrong_counts))
 
     motion_profile = (
-        "    max_rate_mm_per_min: 180000\n",
+        "    max_rate_mm_per_min: 243000\n",
         "    acceleration_mm_per_sec2: 9000\n",
         "  minimum_rpm: 50.0\n",
-        "  maximum_rpm: 500.0\n",
+        "  maximum_rpm: 675.0\n",
         "  acceleration_rpm_per_sec: 1500.0\n",
         "  deceleration_rpm_per_sec: 100.0\n",
     )

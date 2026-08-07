@@ -83,7 +83,7 @@ axes:
   # This is not spindle phase feedback; the lathe encoder below must be a real spindle encoder.
   c:
     steps_per_mm: 4.444444
-    max_rate_mm_per_min: 180000
+    max_rate_mm_per_min: 243000
     acceleration_mm_per_sec2: 9000
     max_travel_mm: 100000
     soft_limits: false
@@ -153,7 +153,7 @@ maijker_5_station_turret:
   pulse_us: 10
   dir_setup_ms: 10
   overshoot_steps: 32
-  lock_backoff_steps: 24
+  lock_backoff_steps: 32
   lock_settle_ms: 250
   require_confirmed_tool: true
   current_tool: 0
@@ -169,7 +169,7 @@ CStepper:
   axis: 5
   cw_positive: true
   minimum_rpm: 50.0
-  maximum_rpm: 500.0
+  maximum_rpm: 675.0
   acceleration_rpm_per_sec: 1500.0
   deceleration_rpm_per_sec: 100.0
   operator_watchdog_ms: 12000

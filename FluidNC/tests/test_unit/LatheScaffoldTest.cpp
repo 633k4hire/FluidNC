@@ -153,10 +153,10 @@ TEST(LatheScaffold, CStepperScaleMatchesEightMicrostepDirectDrive) {
 }
 
 TEST(LatheScaffold, CStepperRpmLimitsAreInclusiveAndRejectOutOfRangeCommands) {
-    EXPECT_FALSE(Spindles::CStepperLogic::rpm_is_commandable(49.0f, 50.0f, 500.0f));
-    EXPECT_TRUE(Spindles::CStepperLogic::rpm_is_commandable(50.0f, 50.0f, 500.0f));
-    EXPECT_TRUE(Spindles::CStepperLogic::rpm_is_commandable(500.0f, 50.0f, 500.0f));
-    EXPECT_FALSE(Spindles::CStepperLogic::rpm_is_commandable(501.0f, 50.0f, 500.0f));
+    EXPECT_FALSE(Spindles::CStepperLogic::rpm_is_commandable(49.0f, 50.0f, 675.0f));
+    EXPECT_TRUE(Spindles::CStepperLogic::rpm_is_commandable(50.0f, 50.0f, 675.0f));
+    EXPECT_TRUE(Spindles::CStepperLogic::rpm_is_commandable(675.0f, 50.0f, 675.0f));
+    EXPECT_FALSE(Spindles::CStepperLogic::rpm_is_commandable(676.0f, 50.0f, 675.0f));
 }
 
 TEST(LatheScaffold, CStepperRpmProducesExpectedPulseRates) {
@@ -205,6 +205,9 @@ TEST(LatheScaffold, CStepperGracefulStopDeadlineTracksLiveRate) {
     EXPECT_EQ(Machine::ContinuousStepperLogic::stop_timeout_ms(
                   Spindles::CStepperLogic::step_rate_millihz(500.0f, stepsPerRev), deceleration),
               5500u);
+    EXPECT_EQ(Machine::ContinuousStepperLogic::stop_timeout_ms(
+                  Spindles::CStepperLogic::step_rate_millihz(675.0f, stepsPerRev), deceleration),
+              7250u);
 }
 
 TEST(LatheScaffold, CStepperGracefulStopRampsThroughMinimumToZero) {
