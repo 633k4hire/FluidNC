@@ -35,9 +35,11 @@ lathe:
   configured X and Z axes. Firmware then prevents simultaneous C-axis and
   spindle ownership.
 - A `CStepper` spindle uses `axes.c.steps_per_mm` only to derive physical
-  pulses/revolution. Configure its continuous `maximum_rpm` and
-  `acceleration_rpm_per_sec` independently; `axes.c.max_rate_mm_per_min`
-  remains the positioning and coordinated-thread-proof ceiling.
+  pulses/revolution. Configure its continuous `minimum_rpm`, `maximum_rpm`,
+  `acceleration_rpm_per_sec`, and `deceleration_rpm_per_sec` independently.
+  A normal `M5` ramps through `minimum_rpm` to zero before releasing the shared
+  chuck; reset, abort, watchdog, and pulse-stream faults remain immediate stops.
+  `axes.c.max_rate_mm_per_min` remains the positioning ceiling.
 - Threading should remain disabled until spindle feedback reports measured RPM, index pulse, angular position, non-stale state, and no fault.
 - `encoder_enable: true` requires `enable: true`, a valid `encoder_pulse_pin`, and `encoder_pulses_per_rev` greater than zero.
 - Threading with the built-in encoder path requires an `encoder_index_pin` so each synchronized pass can align to a known spindle revolution.

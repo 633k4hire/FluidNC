@@ -72,7 +72,14 @@ namespace Spindles {
         virtual const char* driveType() const { return "GENERIC"; }
         virtual float  commandedRpm() const { return static_cast<float>(_current_speed); }
         virtual float  openLoopRpm() const { return commandedRpm(); }
+        virtual float  minimumRpm() const { return 0.0f; }
         virtual float  maximumRpm() { return static_cast<float>(maxSpeed()); }
+        virtual float  accelerationRpmPerSec() const { return 0.0f; }
+        virtual float  decelerationRpmPerSec() const { return 0.0f; }
+        virtual bool   isStopping() const { return false; }
+        virtual uint32_t stopRemainingMs() const { return 0; }
+        virtual uint32_t stopTimeouts() const { return 0; }
+        virtual bool   lastControlActionFailed() const { return false; }
         virtual uint32_t stepsPerRevolution() const { return 0; }
         virtual bool   positionIsDeadReckoned() const { return false; }
         virtual const char* cReferenceName() const { return "UNAVAILABLE"; }

@@ -100,7 +100,7 @@ namespace Machine {
         // axis while the normal planner remains free to move other axes.
         static bool startContinuous(axis_t axis, bool positive, uint32_t rate_millihz, uint32_t acceleration_millihz_per_sec);
         static void setContinuousRate(uint32_t rate_millihz);
-        static void stopContinuous(bool immediate);
+        static void stopContinuous(bool immediate, uint32_t deceleration_millihz_per_sec = 0);
         static void serviceContinuous();
         static bool continuousActive();
         static uint32_t continuousRateMillihz();

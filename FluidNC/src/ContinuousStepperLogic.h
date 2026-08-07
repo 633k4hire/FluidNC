@@ -8,6 +8,24 @@
 #include <limits>
 
 namespace Machine::ContinuousStepperLogic {
+    inline uint32_t stop_timeout_ms(uint32_t current_rate,
+                                    uint32_t deceleration_per_sec,
+                                    uint32_t margin_ms = 500) {
+        if (current_rate == 0) {
+            return margin_ms;
+        }
+        if (deceleration_per_sec == 0) {
+            return 0;
+        }
+
+        const uint64_t ramp_ms =
+            (static_cast<uint64_t>(current_rate) * 1000U + deceleration_per_sec - 1U) / deceleration_per_sec;
+        const uint64_t total_ms = ramp_ms + margin_ms;
+        return total_ms > std::numeric_limits<uint32_t>::max()
+                   ? std::numeric_limits<uint32_t>::max()
+                   : static_cast<uint32_t>(total_ms);
+    }
+
     inline uint32_t ramp_rate(uint32_t current,
                               uint32_t target,
                               uint32_t acceleration_per_sec,

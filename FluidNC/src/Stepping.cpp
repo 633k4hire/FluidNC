@@ -281,7 +281,7 @@ void Stepping::setContinuousRate(uint32_t rate_millihz) {
     _continuousTargetRateMillihz = rate_millihz;
 }
 
-void Stepping::stopContinuous(bool immediate) {
+void Stepping::stopContinuous(bool immediate, uint32_t deceleration_millihz_per_sec) {
     _continuousTargetRateMillihz = 0;
     if (immediate) {
         i2s_out_aux_step_set_rate(0);
@@ -291,6 +291,10 @@ void Stepping::stopContinuous(bool immediate) {
         _continuousRampRemainder = 0;
         _continuousAxis = INVALID_AXIS;
         return;
+    }
+    if (deceleration_millihz_per_sec != 0) {
+        _continuousAccelerationMillihzPerSec = deceleration_millihz_per_sec;
+        _continuousRampRemainder             = 0;
     }
     serviceContinuous();
 }

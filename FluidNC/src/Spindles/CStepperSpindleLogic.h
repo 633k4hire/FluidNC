@@ -8,6 +8,10 @@
 #include <cstdint>
 
 namespace Spindles::CStepperLogic {
+    inline bool rpm_is_commandable(float rpm, float minimum_rpm, float maximum_rpm) {
+        return std::isfinite(rpm) && rpm >= minimum_rpm && rpm <= maximum_rpm;
+    }
+
     inline uint32_t steps_per_revolution(float steps_per_degree) {
         return steps_per_degree <= 0.0f ? 0U : static_cast<uint32_t>(std::lround(steps_per_degree * 360.0f));
     }

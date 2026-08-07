@@ -46,6 +46,18 @@ def main() -> None:
     if wrong_counts:
         raise SystemExit("Maijker configuration has incorrect axis scaling: " + ", ".join(wrong_counts))
 
+    motion_profile = (
+        "    max_rate_mm_per_min: 180000\n",
+        "    acceleration_mm_per_sec2: 9000\n",
+        "  minimum_rpm: 50.0\n",
+        "  maximum_rpm: 500.0\n",
+        "  acceleration_rpm_per_sec: 1500.0\n",
+        "  deceleration_rpm_per_sec: 100.0\n",
+    )
+    missing_profile = [value.strip() for value in motion_profile if value not in canonical]
+    if missing_profile:
+        raise SystemExit("Maijker configuration has an incomplete C motion profile: " + ", ".join(missing_profile))
+
     print("Maijker LittleFS configuration aliases verified.")
 
 

@@ -1870,6 +1870,9 @@ Error gc_execute_line(const char* input_line) {
         if (gc_state.modal.spindle != SpindleState::Disable && !laserIsMotion && !state_is(State::CheckMode)) {
             protocol_buffer_synchronize();
             spindle->setStateRpm(gc_state.modal.spindle, disableLaser ? 0.0f : requested_spindle_rpm);
+            if (spindle->lastControlActionFailed()) {
+                return Error::Reset;
+            }
             gc_ovr_changed();
         }
         gc_state.spindle_speed = gc_block.values.s;  // Update spindle speed state.
@@ -1961,6 +1964,9 @@ Error gc_execute_line(const char* input_line) {
                 return Error::GcodeValueWordInvalid;
             }
             spindle->setStateRpm(gc_block.modal.spindle, gc_state.lathe_commanded_rpm);
+            if (spindle->lastControlActionFailed()) {
+                return Error::Reset;
+            }
         }
         gc_ovr_changed();
         gc_state.modal.spindle = gc_block.modal.spindle;

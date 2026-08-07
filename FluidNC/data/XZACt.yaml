@@ -83,8 +83,8 @@ axes:
   # This is not spindle phase feedback; the lathe encoder below must be a real spindle encoder.
   c:
     steps_per_mm: 4.444444
-    max_rate_mm_per_min: 2000
-    acceleration_mm_per_sec2: 75
+    max_rate_mm_per_min: 180000
+    acceleration_mm_per_sec2: 9000
     max_travel_mm: 100000
     soft_limits: false
     motor0:
@@ -168,8 +168,10 @@ CStepper:
   # from axes.c; continuous spindle speed is configured independently.
   axis: 5
   cw_positive: true
+  minimum_rpm: 50.0
   maximum_rpm: 500.0
-  acceleration_rpm_per_sec: 100.0
+  acceleration_rpm_per_sec: 1500.0
+  deceleration_rpm_per_sec: 100.0
   operator_watchdog_ms: 12000
   tool_num: 0
   off_on_alarm: true

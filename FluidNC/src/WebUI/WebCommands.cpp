@@ -826,12 +826,18 @@ namespace WebUI {
             j.begin_array("data");
 
             j.id_value_object("Lathe enabled", Lathe::enabled() ? "true" : "false");
-            j.id_value_object("Spindle state", spindle_state_name(spindle->get_state()));
+            j.id_value_object("Spindle state", spindle->isStopping() ? "STOPPING" : spindle_state_name(spindle->get_state()));
             j.id_value_object("Shared chuck mode", Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()));
             j.id_value_object("Spindle drive", spindle->driveType());
             j.id_value_object("Spindle commanded RPM", float_string(spindle->commandedRpm()));
             j.id_value_object("Spindle open-loop RPM", float_string(spindle->openLoopRpm()));
+            j.id_value_object("Spindle minimum RPM", float_string(spindle->minimumRpm()));
             j.id_value_object("Spindle maximum RPM", float_string(spindle->maximumRpm()));
+            j.id_value_object("Spindle acceleration RPM/s", float_string(spindle->accelerationRpmPerSec()));
+            j.id_value_object("Spindle deceleration RPM/s", float_string(spindle->decelerationRpmPerSec()));
+            j.id_value_object("Spindle stopping", spindle->isStopping() ? "true" : "false");
+            j.id_value_object("Spindle stop remaining ms", int32_t(spindle->stopRemainingMs()));
+            j.id_value_object("Spindle stop timeouts", int32_t(spindle->stopTimeouts()));
             j.id_value_object("Spindle steps/rev", int32_t(spindle->stepsPerRevolution()));
             j.id_value_object("C position dead reckoned", spindle->positionIsDeadReckoned() ? "true" : "false");
             i2s_out_diagnostics_t i2s_diagnostics = {};

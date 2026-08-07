@@ -4,6 +4,7 @@
 #include "CStepperSpindle.h"
 
 #include "CStepperSpindleLogic.h"
+#include "ContinuousStepperLogic.h"
 #include "GCode.h"
 #include "Lathe.h"
 #include "LatheEncoder.h"
@@ -36,7 +37,10 @@ namespace Spindles {
         // incorrectly cap the spindle at 2000 deg/min / 360 = 5.56 RPM.
         _accelerationMillihzPerSec =
             CStepperLogic::acceleration_millihz_per_sec(_accelerationRpmPerSec, _stepsPerRevolution);
-        if (_stepsPerRevolution == 0 || _maximumRpm <= 0.0f || _accelerationMillihzPerSec == 0) {
+        _decelerationMillihzPerSec =
+            CStepperLogic::acceleration_millihz_per_sec(_decelerationRpmPerSec, _stepsPerRevolution);
+        if (_stepsPerRevolution == 0 || _minimumRpm <= 0.0f || _maximumRpm <= 0.0f ||
+            _minimumRpm > _maximumRpm || _accelerationMillihzPerSec == 0 || _decelerationMillihzPerSec == 0) {
             log_config_error(name() << " C-stepper scale/rate/acceleration is invalid");
             return;
         }
@@ -44,6 +48,9 @@ namespace Spindles {
         _current_state = SpindleState::Disable;
         _current_speed = 0;
         _commandedRpm  = 0.0f;
+        _stopping      = false;
+        _stopStartedMs = 0;
+        _stopDeadlineMs = 0;
         _cReferenceValid = true;
         _lastOperatorHeartbeatMs = millis();
         init_atc();
@@ -52,6 +59,23 @@ namespace Spindles {
 
     bool CStepper::canSetState(SpindleState state, float rpm, const char*& reason) const {
         reason = nullptr;
+        if (state == SpindleState::Cw || state == SpindleState::Ccw) {
+            if (rpm == 0.0f) {
+                return true;
+            }
+            if (!std::isfinite(rpm) || rpm < _minimumRpm) {
+                reason = "C-stepper spindle RPM is below minimum_rpm";
+                return false;
+            }
+            if (!CStepperLogic::rpm_is_commandable(rpm, _minimumRpm, _maximumRpm)) {
+                reason = "C-stepper spindle RPM exceeds maximum_rpm";
+                return false;
+            }
+            if (_stopping) {
+                reason = "C-stepper spindle is still stopping";
+                return false;
+            }
+        }
         if ((state == SpindleState::Cw || state == SpindleState::Ccw) && rpm > 0.0f &&
             (_current_state == SpindleState::Cw || _current_state == SpindleState::Ccw) && state != _current_state) {
             reason = "C-stepper spindle must stop before reversing";
@@ -65,12 +89,13 @@ namespace Spindles {
     }
 
     void CStepper::setStateRpm(SpindleState state, float rpm) {
+        _lastControlActionFailed = false;
         if (sys.abort() && state != SpindleState::Disable) {
             return;
         }
 
         if (state == SpindleState::Disable || rpm <= 0.0f) {
-            stopStream(false);
+            stopStream(sys.abort());
             return;
         }
 
@@ -84,8 +109,7 @@ namespace Spindles {
             return;
         }
 
-        const float clampedRpm = std::min(std::max(rpm, 0.0f), _maximumRpm);
-        const uint32_t rateMillihz = CStepperLogic::step_rate_millihz(clampedRpm, _stepsPerRevolution);
+        const uint32_t rateMillihz = CStepperLogic::step_rate_millihz(rpm, _stepsPerRevolution);
         if (rateMillihz == 0) {
             stopStream(false);
             return;
@@ -101,33 +125,67 @@ namespace Spindles {
             if (!Machine::Stepping::startContinuous(
                     static_cast<axis_t>(_axis), positive, rateMillihz, _accelerationMillihzPerSec)) {
                 log_error(name() << " could not start the C-axis I2S pulse stream");
+                _lastControlActionFailed = true;
                 protocol_disable_steppers();
                 return;
             }
         }
 
         _current_state = state;
-        _current_speed = static_cast<SpindleSpeed>(std::lround(clampedRpm));
-        _commandedRpm  = clampedRpm;
+        _current_speed = static_cast<SpindleSpeed>(std::lround(rpm));
+        _commandedRpm  = rpm;
         sys.set_spindle_speed(_current_speed);
         _lastOperatorHeartbeatMs = millis();
         Lathe::note_shared_chuck_spindle_state(state);
     }
 
     void CStepper::stopStream(bool immediate) {
+        if (_stopping) {
+            if (immediate) {
+                Machine::Stepping::stopContinuous(true);
+            }
+            return;
+        }
+
+        bool stopTimedOut = false;
+        bool stopFaulted  = false;
         if (Machine::Stepping::continuousActive()) {
-            Machine::Stepping::stopContinuous(immediate);
+            const uint32_t startingRate = Machine::Stepping::continuousRateMillihz();
+            const uint32_t timeoutMs = Machine::ContinuousStepperLogic::stop_timeout_ms(
+                startingRate, _decelerationMillihzPerSec);
+            _stopping       = !immediate;
+            _stopStartedMs  = millis();
+            _stopDeadlineMs = timeoutMs;
+            _commandedRpm   = 0.0f;
+            sys.set_spindle_speed(0);
+            Machine::Stepping::stopContinuous(immediate, _decelerationMillihzPerSec);
             if (!immediate) {
-                const uint32_t started = millis();
-                while (Machine::Stepping::continuousActive() && (uint32_t)(millis() - started) < 3000U) {
+                log_info(name() << " stopping from " << openLoopRpm() << " RPM; deadline " << timeoutMs << " ms");
+                while (Machine::Stepping::continuousActive() &&
+                       (uint32_t)(millis() - _stopStartedMs) < timeoutMs) {
                     Machine::Stepping::serviceContinuous();
+                    protocol_exec_rt_system();
+                    stopFaulted = Machine::Stepping::takeContinuousFault();
+                    const bool safetyState = state_is(State::SafetyDoor) || state_is(State::Alarm) ||
+                                             state_is(State::ConfigAlarm) || state_is(State::Critical);
+                    const bool watchdogExpired = _operatorWatchdogMs != 0 &&
+                        (uint32_t)(millis() - _lastOperatorHeartbeatMs) > _operatorWatchdogMs;
+                    if (sys.abort() || safetyState || watchdogExpired || stopFaulted) {
+                        Machine::Stepping::stopContinuous(true);
+                        break;
+                    }
                     delay_ms(5);
                 }
                 if (Machine::Stepping::continuousActive()) {
+                    stopTimedOut = true;
+                    ++_stopTimeouts;
                     Machine::Stepping::stopContinuous(true);
                 }
             }
         }
+        _stopping       = false;
+        _stopStartedMs  = 0;
+        _stopDeadlineMs = 0;
         _current_state = SpindleState::Disable;
         _current_speed = 0;
         _commandedRpm  = 0.0f;
@@ -141,6 +199,15 @@ namespace Spindles {
         // frame. Once stopped, define that physical location as relative C0.
         establishRelativeCZero();
         protocol_disable_steppers();
+        if (stopTimedOut) {
+            _lastControlActionFailed = true;
+            log_error(name() << " graceful stop exceeded its calculated deadline");
+            send_alarm(ExecAlarm::SpindleControl);
+        } else if (stopFaulted) {
+            _lastControlActionFailed = true;
+            log_error(name() << " stopped during deceleration: I2S FIFO underrun");
+            send_alarm(ExecAlarm::SpindleControl);
+        }
     }
 
     void CStepper::establishRelativeCZero() {
@@ -164,6 +231,7 @@ namespace Spindles {
     void CStepper::service() {
         if (Machine::Stepping::takeContinuousFault()) {
             log_error(name() << " stopped: I2S FIFO underrun");
+            _lastControlActionFailed = true;
             stopStream(true);
             send_alarm(ExecAlarm::SpindleControl);
             return;
@@ -198,6 +266,14 @@ namespace Spindles {
                (static_cast<float>(_stepsPerRevolution) * 1000.0f);
     }
 
+    uint32_t CStepper::stopRemainingMs() const {
+        if (!_stopping || _stopDeadlineMs == 0) {
+            return 0;
+        }
+        const uint32_t elapsed = millis() - _stopStartedMs;
+        return elapsed >= _stopDeadlineMs ? 0 : _stopDeadlineMs - elapsed;
+    }
+
     const char* CStepper::cReferenceName() const {
         if (_current_state == SpindleState::Cw || _current_state == SpindleState::Ccw) {
             return "ROTATING";
@@ -210,8 +286,8 @@ namespace Spindles {
 
     void CStepper::config_message() {
         log_info(name() << " C-stepper axis:" << Machine::Axes::axisName(static_cast<axis_t>(_axis))
-                        << " Steps/rev:" << _stepsPerRevolution << " Max RPM:" << _maximumRpm
-                        << " Accel RPM/s:" << _accelerationRpmPerSec
+                        << " Steps/rev:" << _stepsPerRevolution << " RPM:" << _minimumRpm << "-" << _maximumRpm
+                        << " Accel RPM/s:" << _accelerationRpmPerSec << " Decel RPM/s:" << _decelerationRpmPerSec
                         << " CW positive:" << (_cwPositive ? "true" : "false") << atc_info());
     }
 
