@@ -8,8 +8,9 @@ not expose an arbitrary G-code or settings write API.
 
 The commands use FluidNC's normal command channel:
 
-- `$ESP425` is a read command and emits one compact JSON object on one physical
-  line.
+- `$ESP425` is a guest-readable command because physical serial channels run at
+  guest authentication level. It emits one compact JSON object on one physical
+  line and performs no controller write.
 - `$ESP426=...` and `$ESP427=...` are administrator-authenticated writes.
 - The normal FluidNC channel acknowledgement may follow the JSON response.
 - Consumers must select a response by its `schema` or `cmd`, not by assuming it
