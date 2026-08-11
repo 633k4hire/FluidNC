@@ -295,11 +295,19 @@ void Channel::print_msg(MsgLevel level, const char* msg) {
 // This is the most efficient form, but it only works
 // with fixed messages.
 void Channel::sendLine(MsgLevel level, const char* line) {
+    sendLineWithCompletion(level, line, nullptr, nullptr);
+}
+
+void Channel::sendLineWithCompletion(
+    MsgLevel level, const char* line, void (*completion)(void*), void* completionContext) {
     if (outputTask) {
-        LogMessage msg { this, (void*)line, level, false };
+        LogMessage msg { this, (void*)line, level, false, completion, completionContext };
         while (!xQueueSend(message_queue, &msg, 10)) {}
     } else {
         print_msg(level, line);
+        if (completion != nullptr) {
+            completion(completionContext);
+        }
     }
 }
 

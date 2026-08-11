@@ -104,6 +104,8 @@ public:
     virtual void sendLine(MsgLevel level, const char* line);
     virtual void sendLine(MsgLevel level, const std::string* line);
     virtual void sendLine(MsgLevel level, const std::string& line);
+    virtual void sendLineWithCompletion(
+        MsgLevel level, const char* line, void (*completion)(void*), void* completionContext);
 
     size_t _line_number = 0;
 

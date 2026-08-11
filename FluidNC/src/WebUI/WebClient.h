@@ -34,6 +34,8 @@ namespace WebUI {
         void sendLine(MsgLevel level, const char* line) override;
         void sendLine(MsgLevel level, const std::string* line) override;
         void sendLine(MsgLevel level, const std::string& line) override;
+        void sendLineWithCompletion(
+            MsgLevel level, const char* line, void (*completion)(void*), void* completionContext) override;
 
         void sendError(uint16_t code, const std::string& line);
 

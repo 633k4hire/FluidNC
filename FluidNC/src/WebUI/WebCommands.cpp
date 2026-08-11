@@ -27,6 +27,7 @@
 #include "Spindles/Spindle.h"
 #include "ToolChangers/maijker_turret.h"
 #include "Driver/i2s_out.h"
+#include "StaticMessageBufferPool.h"
 
 #include <Esp.h>
 
@@ -39,6 +40,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <freertos/task.h>
 
 #include "Module.h"
 
@@ -344,13 +346,20 @@ namespace WebUI {
 
         static Error showTamsTelemetryJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP425
             constexpr size_t MaxTelemetryBytes = 8192;
+            using TelemetryBufferPool = StaticMessageBufferPool<MaxTelemetryBytes + 1, 1>;
             static uint64_t sequence = 0;
+            static TelemetryBufferPool telemetry_buffers;
             static std::mutex telemetry_mutex;
-            static std::array<char, MaxTelemetryBytes + 1> telemetry_buffer;
 
-            // ESP425 can be requested by the wired M5Dial and the web task at
-            // the same time. Use one fixed buffer so idle polling cannot
-            // fragment the heap or terminate FluidNC on a large allocation.
+            // ESP425 can be requested by a physical serial client and the web
+            // task at the same time. Each fixed buffer remains leased until
+            // the destination has finished consuming it, so the next request
+            // cannot overwrite a payload still queued to the UART output task.
+            auto telemetry_buffer = telemetry_buffers.tryAcquire();
+            while (!telemetry_buffer) {
+                vTaskDelay(1);
+                telemetry_buffer = telemetry_buffers.tryAcquire();
+            }
             std::lock_guard<std::mutex> telemetry_guard(telemetry_mutex);
             size_t payload_size = 0;
             bool payload_overflow = false;
@@ -397,7 +406,7 @@ namespace WebUI {
                         continue;
                     }
                     if (payload_size < MaxTelemetryBytes) {
-                        telemetry_buffer[payload_size++] = *cursor;
+                        telemetry_buffer.data()[payload_size++] = *cursor;
                     } else {
                         payload_overflow = true;
                     }
@@ -690,8 +699,14 @@ namespace WebUI {
                 log_string(out, "{\"schema\":\"tams.fluidnc.telemetry.v1\",\"error\":\"snapshot_too_large\"}");
                 return Error::InvalidValue;
             }
-            telemetry_buffer[payload_size] = '\0';
-            log_string(out, telemetry_buffer.data());
+            telemetry_buffer.data()[payload_size] = '\0';
+            const char* payload = telemetry_buffer.data();
+            void* completion_context = telemetry_buffer.transfer();
+            out.sendLineWithCompletion(
+                MsgLevelNone,
+                payload,
+                TelemetryBufferPool::release,
+                completion_context);
             return Error::Ok;
         }
 

@@ -173,6 +173,17 @@ namespace WebUI {
         print_msg(level, line.c_str());
     }
 
+    void WebClient::sendLineWithCompletion(
+        MsgLevel level,
+        const char* line,
+        void (*completion)(void*),
+        void* completionContext) {
+        print_msg(level, line);
+        if (completion != nullptr) {
+            completion(completionContext);
+        }
+    }
+
     void WebClient::out(const char* s, const char* tag) {
         write((uint8_t*)s, strlen(s));
     }

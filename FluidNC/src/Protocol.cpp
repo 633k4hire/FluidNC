@@ -242,6 +242,9 @@ void output_loop(void* unused) {
                 const char* cp = static_cast<const char*>(message.line);
                 message.channel->print_msg(message.level, cp);
             }
+            if (message.completion != nullptr) {
+                message.completion(message.completionContext);
+            }
         }
     }
 }

@@ -29,6 +29,8 @@ struct LogMessage {
     void*    line;
     MsgLevel level;
     bool     isString;
+    void (*completion)(void*) = nullptr;
+    void* completionContext   = nullptr;
 };
 
 extern TaskHandle_t outputTask;
