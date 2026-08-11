@@ -53,6 +53,7 @@ def main() -> None:
         "  maximum_rpm: 675.0\n",
         "  acceleration_rpm_per_sec: 1500.0\n",
         "  deceleration_rpm_per_sec: 100.0\n",
+        "  max_css_rpm: 675.000\n",
     )
     missing_profile = [value.strip() for value in motion_profile if value not in canonical]
     if missing_profile:
