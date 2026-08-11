@@ -265,11 +265,13 @@ namespace {
         Preferences preferences;
         preferences.begin("tamsfw", false);
         if (preferences.getBool("pending", false)) {
-            std::string expected = preferences.getString("pending_ver", "").c_str();
             std::string pendingPartition = preferences.getString("pending_part", "").c_str();
             const esp_partition_t* running = esp_ota_get_running_partition();
-            if (!expected.empty() && expected == git_info && running &&
-                !pendingPartition.empty() && pendingPartition == running->label) {
+            // A package version is a release label (for example, "1.3.0"),
+            // while git_info is a build identity.  They are intentionally not
+            // the same string.  The boot partition is the authoritative proof
+            // that the validated image activated instead of rolling back.
+            if (running && !pendingPartition.empty() && pendingPartition == running->label) {
                 preferences.putULong("release_ctr", preferences.getULong("pending_rel", 0));
                 preferences.putString("last_result", "success");
             } else {
