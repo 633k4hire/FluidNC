@@ -512,10 +512,11 @@ namespace WebUI {
                                                   const char* canonicalPath,
                                                   const std::string& contentType,
                                                   const std::string& body,
-                                                  const std::string& bodyDigest,
-                                                  uint32_t counter,
-                                                  std::string& responseBody,
-                                                  uint32_t* usedCounter) {
+                                                   const std::string& bodyDigest,
+                                                   uint32_t counter,
+                                                   std::string& responseBody,
+                                                   uint32_t* usedCounter,
+                                                   const std::string& extraHeaders) {
         std::string nonce;
         uint32_t authorizedCounter = 0;
         if (!requestChallenge(counter, nonce, authorizedCounter)) return false;
@@ -529,6 +530,7 @@ namespace WebUI {
                               "\r\nX-TAMS-Manifest: " + _deployment.manifestDigest +
                               "\r\nX-TAMS-Body-SHA256: " + bodyDigest + "\r\nX-TAMS-Auth: " +
                               hex(authentication, sizeof(authentication)) + "\r\n";
+        headers += extraHeaders;
         secureZero(authentication, sizeof(authentication));
         HttpResponse response = httpRequest(_state.ip, method, requestPath, contentType, body, headers);
         responseBody = response.body;
@@ -617,18 +619,23 @@ namespace WebUI {
 
     bool DialFirmwareClient::relayChunk(uint32_t offset, const uint8_t* data, size_t length) {
         if (!_deployment.active || !data || !length || length > 8192 || offset != _deployment.acceptedOffset) return false;
-        std::string body(reinterpret_cast<const char*>(data), length);
+        // WebServer's String-backed plain-body path is not binary-safe for an
+        // arbitrary ESP image chunk.  Hex keeps the relayed HTTP body ASCII;
+        // offsets and limits remain expressed in decoded image bytes.
+        std::string body = hex(data, length);
         std::string path = "/api/v1/ota/chunk?deployment_id=" + _deployment.deploymentId + "&offset=" + std::to_string(offset);
         std::string response;
         auto sendChunk = [&]() {
             return authenticatedRequest("PUT",
                                         path.c_str(),
                                         "/api/v1/ota/chunk",
-                                        "application/octet-stream",
+                                        "text/plain",
                                         body,
-                                        sha256Hex(reinterpret_cast<const uint8_t*>(body.data()), body.size()),
+                                        sha256Hex(body),
                                         _deployment.counter,
-                                        response);
+                                        response,
+                                        nullptr,
+                                        "X-TAMS-Chunk-Encoding: hex\r\n");
         };
         if (!sendChunk()) {
             // A dropped HTTP response is ambiguous: the target may already

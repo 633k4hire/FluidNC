@@ -104,10 +104,11 @@ namespace WebUI {
                                   const char* canonicalPath,
                                   const std::string& contentType,
                                   const std::string& body,
-                                  const std::string& bodyDigest,
-                                  uint32_t counter,
-                                  std::string& response,
-                                  uint32_t* authorizedCounter = nullptr);
+                                   const std::string& bodyDigest,
+                                   uint32_t counter,
+                                   std::string& response,
+                                   uint32_t* authorizedCounter = nullptr,
+                                   const std::string& extraHeaders = {});
 
         DialFirmwareState    _state;
         DialDeploymentState _deployment;
