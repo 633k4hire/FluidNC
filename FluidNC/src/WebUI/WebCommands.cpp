@@ -1123,7 +1123,10 @@ namespace WebUI {
             // WA - need admin password to set
             new WebCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
             new WebCommand(NULL, WEBCMD, WU, "ESP421", "System/Lathe", showLatheStatusJSON, anyState);
-            new WebCommand(NULL, WEBCMD, WU, "ESP425", "System/TamsTelemetry", showTamsTelemetryJSON, anyState);
+            // Physical serial commands run as guest. ESP425 is deliberately
+            // read-only, so keep it guest-readable without weakening the
+            // administrator requirement on the bounded control commands.
+            new WebCommand(NULL, WEBCMD, WG, "ESP425", "System/TamsTelemetry", showTamsTelemetryJSON, anyState);
             new WebCommand("MODE=IDLE|C_POSITIONING|SPINDLE", WEBCMD, WA, "ESP426", "Lathe/SharedChuckMode", selectSharedChuckModeJSON, anyState);
             new WebCommand(
                 "PROBE,AXIS=X|Z,DISTANCE=signed_mm,FEED=mm_per_min", WEBCMD, WA, "ESP427", "Lathe/BoundedProbe", runBoundedProbeJSON, anyState);
