@@ -29,6 +29,7 @@
   <nav aria-label="Console sections">
     <button data-page="dashboard" class="active">Dashboard</button>
     <button data-page="controls" data-lathe>Controls</button>
+    <button data-page="encoder" data-lathe>Encoder</button>
     <button data-page="tooling" data-lathe>Tooling</button>
     <button data-page="settings">Settings</button>
     <button data-page="firmware">Firmware</button>
@@ -105,6 +106,52 @@
             <dt>Freshness</dt><dd id="encoder-freshness">Unavailable</dd>
             <dt>Threading</dt><dd id="threading">Disabled</dd>
           </dl>
+        </article>
+      </div>
+    </section>
+
+    <section id="page-encoder" class="page">
+      <div class="banner warning"><strong>Read-only encoder diagnostics:</strong> A/B feedback is commissioned independently. Index is wired and shown for diagnosis, but an absent Index does not invalidate A/B speed, direction, or relative angle.</div>
+      <div class="encoder-grid">
+        <article class="card encoder-dial-card">
+          <div class="card-head"><h2>Spindle angle</h2><span id="encdiag-live" class="pill">Waiting</span></div>
+          <div class="encoder-dial" role="img" aria-label="Relative spindle encoder angle">
+            <div class="encoder-needle" id="encdiag-needle"></div>
+            <div class="encoder-hub"><strong id="encdiag-degrees">—</strong><small>RELATIVE</small></div>
+            <span class="encoder-zero">0°</span><span class="encoder-quarter">90°</span><span class="encoder-half">180°</span><span class="encoder-three-quarter">270°</span>
+          </div>
+          <div class="direction-row"><span id="encdiag-cw">CW</span><span id="encdiag-ccw">CCW</span></div>
+          <p class="note">The dial follows A/B immediately. Index alignment will be debugged separately.</p>
+        </article>
+
+        <article class="card">
+          <div class="card-head"><h2>ABI signals</h2><span id="encdiag-capture" class="pill">Unknown</span></div>
+          <div class="signal-grid">
+            <div id="encdiag-a" class="signal-tile"><strong>A</strong><small id="encdiag-a-status">No sample</small></div>
+            <div id="encdiag-b" class="signal-tile"><strong>B</strong><small id="encdiag-b-status">No sample</small></div>
+            <div id="encdiag-i" class="signal-tile optional"><strong>I</strong><small id="encdiag-i-status">Not seen (optional)</small></div>
+          </div>
+          <dl class="encoder-values">
+            <dt>Measured speed</dt><dd id="encdiag-rpm">—</dd>
+            <dt>Direction</dt><dd id="encdiag-direction">—</dd>
+            <dt>Configured PPR</dt><dd id="encdiag-ppr">—</dd>
+            <dt>Total A pulses</dt><dd id="encdiag-pulses">—</dd>
+            <dt>Total Index pulses</dt><dd id="encdiag-indexes">—</dd>
+            <dt>Last Index interval</dt><dd id="encdiag-index-interval">—</dd>
+            <dt>Last A pulse age</dt><dd id="encdiag-age">—</dd>
+          </dl>
+        </article>
+
+        <article class="card">
+          <h2>DLC32 encoder wiring</h2>
+          <dl class="encoder-values wiring-values">
+            <dt>A</dt><dd>GPIO33</dd>
+            <dt>B</dt><dd>GPIO35</dd>
+            <dt>I / Index</dt><dd>GPIO39</dd>
+            <dt>Resolution</dt><dd>1000 A rising edges/rev</dd>
+          </dl>
+          <p class="note"><strong>A/B acceptance:</strong> turning the spindle must increase A count, show CW/CCW, update RPM, and move the dial in both directions.</p>
+          <p class="note warning-text"><strong>Index is diagnostic only:</strong> zero Index events are allowed for now. It remains wired so its electrical and sensor behavior can be debugged later. Threading stays disabled.</p>
         </article>
       </div>
     </section>

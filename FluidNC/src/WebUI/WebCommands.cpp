@@ -543,7 +543,13 @@ namespace WebUI {
             json_bool(j, "has_index", feedback.has_index_pulse);
             json_bool(j, "has_angular_position", feedback.has_angular_position);
             json_nullable_number(j, "angular_position_revolution", feedback.has_angular_position, feedback.angular_position_rev);
+            json_number(j, "pulse_count", static_cast<uint64_t>(feedback.pulse_count));
+            json_number(j, "index_count", static_cast<uint64_t>(feedback.index_count));
             json_number(j, "revolution_count", static_cast<uint64_t>(feedback.revolution_count));
+            json_number(j, "last_index_pulses", static_cast<uint64_t>(feedback.last_index_pulses));
+            json_number(j, "last_pulse_age_ms", static_cast<uint64_t>(feedback.last_pulse_age_ms));
+            json_bool(j, "has_direction", feedback.has_direction);
+            j.member("direction", feedback.has_direction ? (feedback.measured_direction > 0 ? "CW" : "CCW") : "UNKNOWN");
             json_bool(j, "stale", feedback.stale);
             json_bool(j, "fault", feedback.fault);
             j.end_object();

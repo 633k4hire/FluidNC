@@ -9,6 +9,8 @@
 
 #if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
 #    include <Arduino.h>
+#    include <esp_timer.h>
+#    include <soc/gpio_struct.h>
 #endif
 
 namespace Lathe {
@@ -17,17 +19,30 @@ namespace Lathe {
         NullSpindleFeedback    null_feedback;
         bool                   capture_active = false;
         pinnum_t               pulse_gpio     = INVALID_PINNUM;
+        pinnum_t               direction_gpio = INVALID_PINNUM;
         pinnum_t               index_gpio     = INVALID_PINNUM;
+        bool                   direction_invert = false;
 
 #if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+        bool IRAM_ATTR encoder_b_high() {
+            const uint32_t gpio = static_cast<uint32_t>(direction_gpio);
+            return gpio < 32U ? ((GPIO.in >> gpio) & 1U) != 0
+                              : ((GPIO.in1.val >> (gpio - 32U)) & 1U) != 0;
+        }
+
         void IRAM_ATTR pulse_isr(void* arg) {
             auto* feedback = static_cast<EncoderSpindleFeedback*>(arg);
-            feedback->record_pulse(micros());
+            int8_t direction = 0;
+            if (direction_gpio != INVALID_PINNUM) {
+                direction = encoder_b_high() ? -1 : 1;
+                if (direction_invert) direction = -direction;
+            }
+            feedback->record_pulse(static_cast<uint32_t>(esp_timer_get_time()), direction);
         }
 
         void IRAM_ATTR index_isr(void* arg) {
             auto* feedback = static_cast<EncoderSpindleFeedback*>(arg);
-            feedback->record_index(micros());
+            feedback->record_index(static_cast<uint32_t>(esp_timer_get_time()));
         }
 #endif
 
@@ -41,7 +56,9 @@ namespace Lathe {
             }
 #endif
             pulse_gpio     = INVALID_PINNUM;
+            direction_gpio = INVALID_PINNUM;
             index_gpio     = INVALID_PINNUM;
+            direction_invert = false;
             capture_active = false;
         }
     }
@@ -58,10 +75,16 @@ namespace Lathe {
 
 #if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
         auto& pulse_pin = config->_lathe->_encoderPulsePin;
+        auto& direction_pin = config->_lathe->_encoderBPin;
         auto& index_pin = config->_lathe->_encoderIndexPin;
+        direction_invert = config->_lathe->_encoderDirectionInvert;
 
         pulse_pin.setAttr(Pin::Attr::Input | Pin::Attr::ISR);
         pulse_gpio = pulse_pin.getNative(Pin::Capabilities::Input | Pin::Capabilities::ISR);
+        if (!direction_pin.undefined()) {
+            direction_pin.setAttr(Pin::Attr::Input);
+            direction_gpio = direction_pin.getNative(Pin::Capabilities::Input);
+        }
         attachInterruptArg(digitalPinToInterrupt(pulse_gpio), pulse_isr, &encoder_feedback, RISING);
 
         if (!index_pin.undefined()) {
@@ -71,8 +94,11 @@ namespace Lathe {
         }
 
         capture_active = true;
-        log_info("Lathe encoder capture enabled pulse:" << pulse_pin.name() << " index:" << (index_pin.undefined() ? "none" : index_pin.name())
-                                                        << " ppr:" << encoder_pulses_per_revolution());
+        log_info("Lathe encoder capture enabled a:" << pulse_pin.name()
+                                                     << " b:" << (direction_pin.undefined() ? "none" : direction_pin.name())
+                                                               << " b_invert:" << (direction_invert ? "true" : "false")
+                                                               << " index:" << (index_pin.undefined() ? "none" : index_pin.name())
+                                                               << " ppr:" << encoder_pulses_per_revolution());
 #else
         capture_active = true;
         log_warn("Lathe encoder capture configured but hardware GPIO interrupts are unavailable on this build");

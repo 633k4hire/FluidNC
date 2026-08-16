@@ -36,6 +36,11 @@ function extractJson(text){
   return JSON.parse(text.slice(start,end+1));
 }
 async function jsonFetch(url,options={}){return extractJson(await textFetch(url,options));}
+async function jsonFetchTimeout(url,options={},timeoutMs=2500){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await jsonFetch(url,{...options,signal:controller.signal});}
+  finally{clearTimeout(timer);}
+}
 function writeHeaders(extra={}){
   return {"X-CSRF-Token":state.csrf,"X-TAMS-Control-Token":state.control,...extra};
 }
@@ -110,6 +115,9 @@ function number(value,fallback="—"){
   if(value===null||value===undefined)return fallback;
   const parsed=Number(value);return Number.isFinite(parsed)?parsed.toFixed(3):fallback;
 }
+function integer(value,fallback="—"){
+  const parsed=Number(value);return Number.isFinite(parsed)?Math.trunc(parsed).toLocaleString():fallback;
+}
 function renderStations(container,active,target,controls=false){
   container.innerHTML="";
   for(let tool=1;tool<=5;tool++){
@@ -122,6 +130,28 @@ function renderStations(container,active,target,controls=false){
     }
     container.append(element);
   }
+}
+
+function renderEncoderDiagnostics(spindle,encoder){
+  const pulses=Number(encoder.pulse_count)||0,indexes=Number(encoder.index_count)||0;
+  const direction=encoder.has_direction?String(encoder.direction).toUpperCase():"UNKNOWN";
+  const fraction=Number(encoder.angular_position_revolution);
+  const angle=Number.isFinite(fraction)?((fraction%1)+1)%1*360:0;
+  const live=!!encoder.capture_active&&!encoder.stale;
+  $("#encdiag-live").textContent=live?"Live":encoder.capture_active?"Stopped / stale":"Inactive";
+  $("#encdiag-live").className=`pill ${live?"good":encoder.capture_active?"":"danger"}`;
+  $("#encdiag-capture").textContent=encoder.capture_active?"Capture active":"Capture inactive";
+  $("#encdiag-capture").className=`pill ${encoder.capture_active?"good":"danger"}`;
+  $("#encdiag-a").classList.toggle("good",pulses>0);$("#encdiag-a-status").textContent=pulses>0?`${integer(pulses)} edges`:"No pulse captured";
+  $("#encdiag-b").classList.toggle("good",!!encoder.has_direction);$("#encdiag-b-status").textContent=encoder.has_direction?`${direction} decoded`:"No direction decoded";
+  $("#encdiag-i").classList.toggle("good",indexes>0);$("#encdiag-i-status").textContent=indexes>0?`${integer(indexes)} captured`:"Not seen (optional)";
+  $("#encdiag-needle").style.transform=`rotate(${angle.toFixed(3)}deg)`;$("#encdiag-degrees").textContent=`${angle.toFixed(1)}°`;
+  $("#encdiag-cw").classList.toggle("active",direction==="CW");$("#encdiag-ccw").classList.toggle("active",direction==="CCW");
+  $("#encdiag-rpm").textContent=encoder.has_measured_rpm?`${number(spindle.measured_rpm)} RPM`:"—";
+  $("#encdiag-direction").textContent=direction;$("#encdiag-ppr").textContent=integer(encoder.pulses_per_revolution);
+  $("#encdiag-pulses").textContent=integer(pulses);$("#encdiag-indexes").textContent=integer(indexes);
+  $("#encdiag-index-interval").textContent=Number(encoder.last_index_pulses)>0?`${integer(encoder.last_index_pulses)} pulses`:"Not measured";
+  $("#encdiag-age").textContent=pulses>0?`${integer(encoder.last_pulse_age_ms)} ms`:"No pulse captured";
 }
 
 function renderTelemetry(data){
@@ -203,6 +233,7 @@ function renderTelemetry(data){
   $("#control-commanded-rpm").textContent=Math.round(commanded);
   $("#control-measured-rpm").textContent=measured===null?"—":Math.round(measured);
   $("#control-encoder-state").textContent=encoderReady?encoder.fault?"Fault":encoder.stale?"Stale":"Ready":"Not commissioned";
+  renderEncoderDiagnostics(spindle,encoder);
   state.cReady=encoderReady&&encoder.has_angular_position;
   updateCControls();
   $("#connection-dot").className="dot online";$("#connection-label").textContent="Controller online";
@@ -221,13 +252,19 @@ function updateCControls(){
 
 async function refreshStatus(){
   try{
-    const telemetry=await jsonFetch("/api/v1/lathe/status");
+    const telemetry=await jsonFetchTimeout("/api/v1/lathe/status",{},2000);
     renderTelemetry(telemetry);
   }catch(error){
     state.fresh=false;
     $("#connection-dot").className="dot offline";$("#connection-label").textContent="Controller unavailable";
     $("#machine-state").textContent="Stale";$("#diag-telemetry").textContent="Stale";
   }
+}
+
+async function statusPoll(){
+  await refreshStatus();
+  const encoderLive=$("#page-encoder").classList.contains("active")&&document.visibilityState==="visible";
+  setTimeout(statusPoll,encoderLive?750:1500);
 }
 
 async function typedAction(type,body={}){
@@ -508,6 +545,6 @@ toolRows();renderStations($("#turret-stations"));renderStations($("#turret-contr
 (async()=>{
   await initializeConsole();
   await Promise.all([refreshStatus(),refreshFirmware()]);
-  setInterval(refreshStatus,1500);
+  setTimeout(statusPoll,1500);
   setInterval(refreshFirmware,5000);
 })();

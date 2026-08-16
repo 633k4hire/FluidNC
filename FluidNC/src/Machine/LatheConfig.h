@@ -25,7 +25,9 @@ namespace Machine {
         uint32_t _feedbackStaleMs  = 250;
         bool     _encoderEnable    = false;
         Pin      _encoderPulsePin;
+        Pin      _encoderBPin;
         Pin      _encoderIndexPin;
+        bool     _encoderDirectionInvert = false;
         uint32_t _encoderPulsesPerRev = 1;
 
         void group(Configuration::HandlerBase& handler) override {
@@ -42,7 +44,9 @@ namespace Machine {
             handler.item("feedback_stale_ms", _feedbackStaleMs, 1, 60000);
             handler.item("encoder_enable", _encoderEnable);
             handler.item("encoder_pulse_pin", _encoderPulsePin);
+            handler.item("encoder_b_pin", _encoderBPin);
             handler.item("encoder_index_pin", _encoderIndexPin);
+            handler.item("encoder_direction_invert", _encoderDirectionInvert);
             handler.item("encoder_pulses_per_rev", _encoderPulsesPerRev, 1, 1000000);
         }
 
@@ -73,6 +77,9 @@ namespace Machine {
             }
             if (_enableThreading && _encoderEnable && _encoderIndexPin.undefined()) {
                 throw std::runtime_error("Lathe threading with encoder_enable requires encoder_index_pin");
+            }
+            if (_enableThreading && _encoderEnable && _encoderBPin.undefined()) {
+                throw std::runtime_error("Lathe threading with encoder_enable requires encoder_b_pin");
             }
         }
     };

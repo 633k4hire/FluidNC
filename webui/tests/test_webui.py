@@ -6,6 +6,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SERVER = ROOT.parent / "FluidNC" / "src" / "WebUI" / "WebUIServer.cpp"
+WEB_COMMANDS = ROOT.parent / "FluidNC" / "src" / "WebUI" / "WebCommands.cpp"
 CLIENT = ROOT.parent / "FluidNC" / "src" / "WebUI" / "DialFirmwareClient.cpp"
 PROTOCOL = ROOT.parent / "FluidNC" / "src" / "Protocol.cpp"
 JSON_GENERATOR = ROOT.parent / "FluidNC" / "src" / "Configuration" / "JsonGenerator.cpp"
@@ -22,6 +23,7 @@ class WebUiTests(unittest.TestCase):
         cls.payload = build_webui.build()
         cls.html = gzip.decompress(cls.payload).decode("utf-8")
         cls.server = SERVER.read_text(encoding="utf-8")
+        cls.web_commands = WEB_COMMANDS.read_text(encoding="utf-8")
         cls.client = CLIENT.read_text(encoding="utf-8")
         cls.protocol = PROTOCOL.read_text(encoding="utf-8")
         cls.json_generator = JSON_GENERATOR.read_text(encoding="utf-8")
@@ -38,6 +40,7 @@ class WebUiTests(unittest.TestCase):
         for text in (
             "Dashboard",
             "Controls",
+            "Encoder",
             "Tooling",
             "Settings",
             "Firmware",
@@ -48,8 +51,41 @@ class WebUiTests(unittest.TestCase):
             "Flash Settings",
             "Config Items",
             "Five-position Turret",
+            "Read-only encoder diagnostics",
         ):
             self.assertIn(text, self.html)
+
+    def test_encoder_tab_is_read_only_and_index_is_non_blocking(self):
+        for marker in (
+            'id="page-encoder"',
+            'id="encdiag-needle"',
+            'id="encdiag-a"',
+            'id="encdiag-b"',
+            'id="encdiag-i"',
+            "Index is diagnostic only",
+            "zero Index events are allowed",
+            "function renderEncoderDiagnostics(spindle,encoder)",
+            "encoderLive?750:1500",
+        ):
+            self.assertIn(marker, self.html)
+        self.assertNotIn('id="page-encoder" data-write', self.html)
+
+    def test_encoder_telemetry_exposes_quadrature_and_index_diagnostics(self):
+        compact = self.web_commands.replace(" ", "")
+        for field in (
+            '"pulse_count"',
+            '"index_count"',
+            '"last_index_pulses"',
+            '"last_pulse_age_ms"',
+            '"has_direction"',
+            '"direction"',
+        ):
+            self.assertIn(field, compact)
+
+    def test_encoder_polling_is_bounded(self):
+        self.assertIn("function jsonFetchTimeout(url,options={},timeoutMs=2500)", self.html)
+        self.assertIn("controller.abort()", self.html)
+        self.assertNotIn("setInterval(refreshStatus,1500)", self.html)
 
     def test_radial_jog_and_visual_spindle_are_distinct(self):
         self.assertIn('class="radial-jog"', self.html)
@@ -166,7 +202,7 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("FirmwareRelayChunkSize  = 4096", self.server)
         self.assertIn("length > 8192", self.client)
         self.assertIn("authenticated M5Dial identity mismatch", self.client)
-        self.assertIn("M5Dial response authentication failed", self.client)
+        self.assertIn("M5Dial response proof mismatch", self.client)
         self.assertIn("M5Dial rolled back to the previous application", self.client)
 
     def test_receipts_are_capped_and_persisted(self):

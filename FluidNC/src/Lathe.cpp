@@ -14,6 +14,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+#    include <Arduino.h>
+#endif
+
 namespace Lathe {
     namespace {
         struct ToolSlot {
@@ -335,60 +339,123 @@ namespace Lathe {
     }
 
     bool feedback_supports_threading(const FeedbackStatus& status) {
-        return status.has_measured_rpm && status.has_index_pulse && status.has_angular_position && !status.stale && !status.fault &&
+        return status.has_measured_rpm && status.has_index_pulse && status.has_angular_position && status.has_direction && !status.stale && !status.fault &&
                status.measured_rpm > 0;
     }
 
     void EncoderSpindleFeedback::configure(uint32_t pulses_per_revolution, uint32_t stale_timeout_ms) {
-        _pulses_per_revolution = std::max<uint32_t>(pulses_per_revolution, 1);
-        _stale_timeout_ms      = std::max<uint32_t>(stale_timeout_ms, 1);
-        _last_pulse_us         = 0;
-        _previous_pulse_us     = 0;
-        _last_index_us         = 0;
-        _pulse_count           = 0;
-        _index_pulse_count     = 0;
-        _commanded_rpm         = 0;
+        _snapshot_generation.fetch_add(1, std::memory_order_acq_rel);
+        _pulses_per_revolution.store(std::max<uint32_t>(pulses_per_revolution, 1), std::memory_order_relaxed);
+        _stale_timeout_ms.store(std::max<uint32_t>(stale_timeout_ms, 1), std::memory_order_relaxed);
+        _last_pulse_us.store(0, std::memory_order_relaxed);
+        _filtered_period_us.store(0, std::memory_order_relaxed);
+        _pulse_count.store(0, std::memory_order_relaxed);
+        _index_pulse_count.store(0, std::memory_order_relaxed);
+        _last_index_pulse_count.store(0, std::memory_order_relaxed);
+        _last_index_pulses.store(0, std::memory_order_relaxed);
+        _signed_position.store(0, std::memory_order_relaxed);
+        _measured_direction.store(0, std::memory_order_relaxed);
+        _commanded_rpm.store(0, std::memory_order_relaxed);
+        _snapshot_generation.fetch_add(1, std::memory_order_release);
     }
 
     void EncoderSpindleFeedback::set_commanded_rpm(SpindleSpeed rpm) {
-        _commanded_rpm = rpm;
+        _commanded_rpm.store(rpm, std::memory_order_relaxed);
     }
 
-    void EncoderSpindleFeedback::record_pulse(uint32_t timestamp_us) {
-        _previous_pulse_us = _last_pulse_us;
-        _last_pulse_us     = timestamp_us;
-        ++_pulse_count;
-    }
-
-    void EncoderSpindleFeedback::record_index(uint32_t timestamp_us) {
-        _last_index_us = timestamp_us;
-        ++_index_pulse_count;
-        if (_last_pulse_us == 0) {
-            record_pulse(timestamp_us);
+    void LATHE_IRAM_ATTR EncoderSpindleFeedback::record_pulse(uint32_t timestamp_us, int8_t direction) {
+        _snapshot_generation.fetch_add(1, std::memory_order_acq_rel);
+        const uint32_t previous = _last_pulse_us.exchange(timestamp_us, std::memory_order_relaxed);
+        const uint32_t period = timestamp_us - previous;
+        if (previous != 0 && period != 0) {
+            const uint32_t filtered = _filtered_period_us.load(std::memory_order_relaxed);
+            _filtered_period_us.store(filtered == 0 ? period : static_cast<uint32_t>((static_cast<uint64_t>(filtered) * 3U + period) / 4U),
+                                      std::memory_order_relaxed);
         }
+        _pulse_count.fetch_add(1, std::memory_order_relaxed);
+        if (direction != 0) {
+            const int8_t normalized = direction > 0 ? 1 : -1;
+            _measured_direction.store(normalized, std::memory_order_relaxed);
+            _signed_position.fetch_add(normalized, std::memory_order_relaxed);
+        }
+        _snapshot_generation.fetch_add(1, std::memory_order_release);
+    }
+
+    void LATHE_IRAM_ATTR EncoderSpindleFeedback::record_index(uint32_t timestamp_us) {
+        (void)timestamp_us;
+        _snapshot_generation.fetch_add(1, std::memory_order_acq_rel);
+        const uint32_t pulses = _pulse_count.load(std::memory_order_relaxed);
+        const uint32_t previous = _last_index_pulse_count.exchange(pulses, std::memory_order_relaxed);
+        if (_index_pulse_count.load(std::memory_order_relaxed) != 0) {
+            _last_index_pulses.store(pulses - previous, std::memory_order_relaxed);
+        }
+        _index_pulse_count.fetch_add(1, std::memory_order_relaxed);
+        _snapshot_generation.fetch_add(1, std::memory_order_release);
     }
 
     FeedbackStatus EncoderSpindleFeedback::status() const {
-        return status_at(_last_pulse_us / 1000U);
+#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+        return status_at(millis());
+#else
+        return status_at(_last_pulse_us.load(std::memory_order_relaxed) / 1000U);
+#endif
     }
 
     FeedbackStatus EncoderSpindleFeedback::status_at(uint32_t now_ms) const {
-        FeedbackStatus status;
-        status.commanded_rpm = _commanded_rpm;
-        status.timestamp_ms  = _last_pulse_us / 1000U;
+        uint32_t generation_before = 0;
+        uint32_t generation_after = 0;
+        uint32_t pulses_per_revolution = 1;
+        uint32_t stale_timeout_ms = 1;
+        uint32_t last_pulse_us = 0;
+        uint32_t filtered_period_us = 0;
+        uint32_t pulse_count = 0;
+        uint32_t index_count = 0;
+        uint32_t last_index_pulses = 0;
+        int32_t signed_position = 0;
+        int8_t measured_direction = 0;
+        do {
+            generation_before = _snapshot_generation.load(std::memory_order_acquire);
+            if (generation_before & 1U) continue;
+            pulses_per_revolution = _pulses_per_revolution.load(std::memory_order_relaxed);
+            stale_timeout_ms = _stale_timeout_ms.load(std::memory_order_relaxed);
+            last_pulse_us = _last_pulse_us.load(std::memory_order_relaxed);
+            filtered_period_us = _filtered_period_us.load(std::memory_order_relaxed);
+            pulse_count = _pulse_count.load(std::memory_order_relaxed);
+            index_count = _index_pulse_count.load(std::memory_order_relaxed);
+            last_index_pulses = _last_index_pulses.load(std::memory_order_relaxed);
+            signed_position = _signed_position.load(std::memory_order_relaxed);
+            measured_direction = _measured_direction.load(std::memory_order_relaxed);
+            generation_after = _snapshot_generation.load(std::memory_order_acquire);
+        } while (generation_before != generation_after || (generation_after & 1U));
 
-        const bool has_pulses = _last_pulse_us != 0 && _pulse_count > 0;
-        if (has_pulses && _previous_pulse_us != 0 && _last_pulse_us > _previous_pulse_us) {
-            const uint32_t pulse_period_us = _last_pulse_us - _previous_pulse_us;
-            status.measured_rpm = (60.0f * 1000000.0f) / (static_cast<float>(pulse_period_us) * static_cast<float>(_pulses_per_revolution));
+        FeedbackStatus status;
+        status.commanded_rpm = _commanded_rpm.load(std::memory_order_relaxed);
+        status.timestamp_ms  = last_pulse_us / 1000U;
+        status.pulse_count = pulse_count;
+        status.index_count = index_count;
+        status.last_index_pulses = last_index_pulses;
+        status.measured_direction = measured_direction;
+        status.has_direction = measured_direction != 0;
+
+        const bool has_pulses = last_pulse_us != 0 && pulse_count > 0;
+        if (has_pulses && filtered_period_us != 0) {
+            status.measured_rpm = (60.0f * 1000000.0f) /
+                                  (static_cast<float>(filtered_period_us) * static_cast<float>(pulses_per_revolution));
             status.has_measured_rpm = true;
         }
 
-        status.has_index_pulse       = _index_pulse_count > 0;
+        const int32_t phase = ((signed_position % static_cast<int32_t>(pulses_per_revolution)) +
+                               static_cast<int32_t>(pulses_per_revolution)) %
+                              static_cast<int32_t>(pulses_per_revolution);
+        status.has_index_pulse       = index_count > 0;
         status.has_angular_position  = has_pulses;
-        status.revolution_count      = _index_pulse_count;
-        status.angular_position_rev  = static_cast<float>(_pulse_count % _pulses_per_revolution) / static_cast<float>(_pulses_per_revolution);
-        status.stale                 = !has_pulses || (now_ms > status.timestamp_ms && (now_ms - status.timestamp_ms) > _stale_timeout_ms);
+        status.revolution_count      = pulse_count / pulses_per_revolution;
+        status.angular_position_rev  = static_cast<float>(phase) / static_cast<float>(pulses_per_revolution);
+        status.last_pulse_age_ms     = has_pulses ? now_ms - status.timestamp_ms : 0;
+        status.stale                 = !has_pulses ||
+                                       (static_cast<int32_t>(status.last_pulse_age_ms) > 0 && status.last_pulse_age_ms > stale_timeout_ms);
+        // Index is observational until separately commissioned. Missing or
+        // malformed index pulses must not invalidate proven A/B feedback.
         status.fault                 = false;
         return status;
     }

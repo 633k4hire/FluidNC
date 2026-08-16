@@ -47,7 +47,7 @@ axes:
       seek_scaler: 1.100
       feed_scaler: 1.100
     motor0:
-      limit_neg_pin: gpio.36:low
+      limit_pos_pin: gpio.36:low
       hard_limits: true
       pulloff_mm: 2
       stepstick:
@@ -72,7 +72,7 @@ axes:
       seek_scaler: 1.100
       feed_scaler: 1.100
     motor0:
-      limit_neg_pin: gpio.34:low
+      limit_pos_pin: gpio.34:low
       hard_limits: true
       pulloff_mm: 2
       stepstick:
@@ -216,9 +216,11 @@ lathe:
   shared_chuck: true
   c_axis: 5
   feedback_stale_ms: 250
-  encoder_enable: false
-  # No spindle/C-axis encoder is currently installed. Keep feedback and
-  # threading disabled until encoder hardware is installed and commissioned.
-  encoder_pulse_pin: NO_PIN
-  encoder_index_pin: NO_PIN
-  encoder_pulses_per_rev: 1
+  encoder_enable: true
+  # AS5047P ABI commissioning profile. A/B feedback is operational; Index is
+  # wired and reported for later diagnosis but does not gate A/B feedback.
+  encoder_pulse_pin: gpio.33
+  encoder_b_pin: gpio.35
+  encoder_index_pin: gpio.39
+  encoder_direction_invert: false
+  encoder_pulses_per_rev: 1000

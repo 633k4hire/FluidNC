@@ -21,7 +21,9 @@ lathe:
   feedback_stale_ms: 250
   encoder_enable: true
   encoder_pulse_pin: gpio.34
+  encoder_b_pin: gpio.33
   encoder_index_pin: gpio.35
+  encoder_direction_invert: false
   encoder_pulses_per_rev: 1024
 ```
 
@@ -42,7 +44,12 @@ lathe:
   `axes.c.max_rate_mm_per_min` remains the positioning ceiling.
 - Threading should remain disabled until spindle feedback reports measured RPM, index pulse, angular position, non-stale state, and no fault.
 - `encoder_enable: true` requires `enable: true`, a valid `encoder_pulse_pin`, and `encoder_pulses_per_rev` greater than zero.
-- Threading with the built-in encoder path requires an `encoder_index_pin` so each synchronized pass can align to a known spindle revolution.
+- Quadrature feedback requires `encoder_b_pin`. Use
+  `encoder_direction_invert` when the installed sensor orientation reverses
+  the configured CW/CCW interpretation.
+- `encoder_index_pin` is optional for A/B speed, direction, and relative-angle
+  feedback. Threading still requires Index so each synchronized pass can align
+  to a known spindle revolution.
 
 ## Supported lathe modal commands
 

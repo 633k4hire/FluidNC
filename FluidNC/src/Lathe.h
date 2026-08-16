@@ -8,9 +8,17 @@
 #include "SpindleDatatypes.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <string>
+
+#if defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+#    include <esp_attr.h>
+#    define LATHE_IRAM_ATTR IRAM_ATTR
+#else
+#    define LATHE_IRAM_ATTR
+#endif
 
 namespace Lathe {
     enum class SpindleSpeedMode : uint8_t {
@@ -189,17 +197,23 @@ namespace Lathe {
 
     struct FeedbackStatus {
         SpindleSpeed commanded_rpm = 0;
-        SpindleSpeed measured_rpm  = 0;
+        float        measured_rpm  = 0.0f;
         uint32_t     timestamp_ms  = 0;
         float        angular_position_rev = 0.0f;
+        uint32_t     pulse_count = 0;
+        uint32_t     index_count = 0;
         uint32_t     revolution_count = 0;
+        uint32_t     last_index_pulses = 0;
+        uint32_t     last_pulse_age_ms = 0;
+        int8_t       measured_direction = 0;
         bool         has_measured_rpm : 1;
         bool         has_index_pulse : 1;
         bool         has_angular_position : 1;
+        bool         has_direction : 1;
         bool         stale : 1;
         bool         fault : 1;
 
-        FeedbackStatus() : has_measured_rpm(false), has_index_pulse(false), has_angular_position(false), stale(false), fault(false) {}
+        FeedbackStatus() : has_measured_rpm(false), has_index_pulse(false), has_angular_position(false), has_direction(false), stale(false), fault(false) {}
     };
 
     class SpindleFeedback {
@@ -215,22 +229,26 @@ namespace Lathe {
     public:
         void configure(uint32_t pulses_per_revolution, uint32_t stale_timeout_ms);
         void set_commanded_rpm(SpindleSpeed rpm);
-        void record_pulse(uint32_t timestamp_us);
-        void record_index(uint32_t timestamp_us);
+        void LATHE_IRAM_ATTR record_pulse(uint32_t timestamp_us, int8_t direction);
+        void LATHE_IRAM_ATTR record_index(uint32_t timestamp_us);
         FeedbackStatus status() const override;
         FeedbackStatus status_at(uint32_t now_ms) const;
         bool synchronize_for_threading_start() const override;
-        uint32_t pulses_per_revolution() const { return _pulses_per_revolution; }
+        uint32_t pulses_per_revolution() const { return _pulses_per_revolution.load(std::memory_order_relaxed); }
 
     private:
-        uint32_t _pulses_per_revolution = 1;
-        uint32_t _stale_timeout_ms      = 250;
-        uint32_t _last_pulse_us         = 0;
-        uint32_t _previous_pulse_us     = 0;
-        uint32_t _last_index_us         = 0;
-        uint32_t _pulse_count           = 0;
-        uint32_t _index_pulse_count     = 0;
-        SpindleSpeed _commanded_rpm     = 0;
+        std::atomic<uint32_t> _snapshot_generation { 0 };
+        std::atomic<uint32_t> _pulses_per_revolution { 1 };
+        std::atomic<uint32_t> _stale_timeout_ms { 250 };
+        std::atomic<uint32_t> _last_pulse_us { 0 };
+        std::atomic<uint32_t> _filtered_period_us { 0 };
+        std::atomic<uint32_t> _pulse_count { 0 };
+        std::atomic<uint32_t> _index_pulse_count { 0 };
+        std::atomic<uint32_t> _last_index_pulse_count { 0 };
+        std::atomic<uint32_t> _last_index_pulses { 0 };
+        std::atomic<int32_t>  _signed_position { 0 };
+        std::atomic<int8_t>   _measured_direction { 0 };
+        std::atomic<SpindleSpeed> _commanded_rpm { 0 };
     };
 
     bool enabled();

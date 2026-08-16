@@ -55,7 +55,7 @@ TEST(LatheScaffold, FeedPerRevConvertsToMillimetersPerMinute) {
     EXPECT_NEAR(Lathe::feed_per_rev_to_mm_per_min(0.01f, 1000.0f, true), 254.0f, 0.001f);
 }
 
-TEST(LatheScaffold, ThreadingFeedbackRequiresMeasuredRpmIndexAndAngularPosition) {
+TEST(LatheScaffold, ThreadingFeedbackRequiresMeasuredRpmIndexAngleAndDirection) {
     Lathe::FeedbackStatus status;
 
     EXPECT_FALSE(Lathe::feedback_supports_threading(status));
@@ -63,6 +63,8 @@ TEST(LatheScaffold, ThreadingFeedbackRequiresMeasuredRpmIndexAndAngularPosition)
     status.has_measured_rpm      = true;
     status.has_index_pulse       = true;
     status.has_angular_position  = true;
+    status.has_direction         = true;
+    status.measured_direction    = 1;
     status.measured_rpm          = 600;
     EXPECT_TRUE(Lathe::feedback_supports_threading(status));
 
@@ -79,8 +81,8 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     feedback.configure(100, 250);
     feedback.set_commanded_rpm(600);
     feedback.record_index(1000000);
-    feedback.record_pulse(1001000);
-    feedback.record_pulse(1002000);
+    feedback.record_pulse(1001000, 1);
+    feedback.record_pulse(1002000, 1);
 
     auto status = feedback.status_at(1002);
     EXPECT_TRUE(status.has_measured_rpm);
@@ -89,12 +91,53 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     EXPECT_FALSE(status.stale);
     EXPECT_EQ(status.commanded_rpm, 600);
     EXPECT_NEAR(status.measured_rpm, 600.0f, 0.001f);
-    EXPECT_NEAR(status.angular_position_rev, 0.03f, 0.001f);
+    EXPECT_TRUE(status.has_direction);
+    EXPECT_EQ(status.measured_direction, 1);
+    EXPECT_EQ(status.pulse_count, 2u);
+    EXPECT_EQ(status.index_count, 1u);
+    EXPECT_NEAR(status.angular_position_rev, 0.02f, 0.001f);
     EXPECT_TRUE(Lathe::feedback_supports_threading(status));
 
     auto stale = feedback.status_at(2000);
     EXPECT_TRUE(stale.stale);
     EXPECT_FALSE(Lathe::feedback_supports_threading(stale));
+}
+
+TEST(LatheScaffold, QuadratureFeedbackTracksReverseMotionWithoutIndex) {
+    Lathe::EncoderSpindleFeedback feedback;
+    feedback.configure(100, 250);
+    feedback.record_pulse(1000000, 1);
+    feedback.record_pulse(1001000, 1);
+    feedback.record_pulse(1002000, -1);
+
+    auto status = feedback.status_at(1002);
+    EXPECT_TRUE(status.has_angular_position);
+    EXPECT_TRUE(status.has_direction);
+    EXPECT_FALSE(status.has_index_pulse);
+    EXPECT_FALSE(status.fault);
+    EXPECT_EQ(status.measured_direction, -1);
+    EXPECT_EQ(status.pulse_count, 3u);
+    EXPECT_NEAR(status.angular_position_rev, 0.01f, 0.001f);
+}
+
+TEST(LatheScaffold, IndexIsObservedButDoesNotGateOrFaultQuadratureFeedback) {
+    Lathe::EncoderSpindleFeedback feedback;
+    feedback.configure(4, 250);
+    for (uint32_t pulse = 0; pulse < 10; ++pulse) {
+        feedback.record_pulse(1000000 + pulse * 1000, 1);
+    }
+
+    auto withoutIndex = feedback.status_at(1009);
+    EXPECT_TRUE(withoutIndex.has_measured_rpm);
+    EXPECT_TRUE(withoutIndex.has_angular_position);
+    EXPECT_FALSE(withoutIndex.has_index_pulse);
+    EXPECT_FALSE(withoutIndex.fault);
+
+    feedback.record_index(1010000);
+    auto withIndex = feedback.status_at(1010);
+    EXPECT_TRUE(withIndex.has_index_pulse);
+    EXPECT_EQ(withIndex.index_count, 1u);
+    EXPECT_FALSE(withIndex.fault);
 }
 
 
