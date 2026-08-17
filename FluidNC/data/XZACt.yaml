@@ -221,6 +221,6 @@ lathe:
   # wired and reported for later diagnosis but does not gate A/B feedback.
   encoder_pulse_pin: gpio.33
   encoder_b_pin: gpio.35
-  encoder_index_pin: gpio.39
+  encoder_index_pin: gpio.4
   encoder_direction_invert: false
   encoder_pulses_per_rev: 1000
