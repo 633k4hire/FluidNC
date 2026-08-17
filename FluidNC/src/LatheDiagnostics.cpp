@@ -2,6 +2,8 @@
 
 #include "Machine/Axes.h"
 #include "Machine/MachineConfig.h"
+#include "Driver/i2s_out.h"
+#include "Lathe.h"
 #include "Planner.h"
 #include "State.h"
 #include "Stepper.h"
@@ -157,6 +159,10 @@ namespace LatheDiagnostics {
         cursor = eventCursor;
         portEXIT_CRITICAL(&mux);
 
+        i2s_out_diagnostics_t i2s = {};
+        i2s_out_get_diagnostics(&i2s);
+        const axis_t cAxis = Lathe::c_axis();
+
         std::string json =
             "{\"schema_version\":1,\"device\":\"dlc32\",\"uptime_ms\":" +
             std::to_string(millis()) + ",\"reset_reason\":" +
@@ -171,6 +177,18 @@ namespace LatheDiagnostics {
             ",\"idle_count\":" + std::to_string(stepperIdleCount) +
             ",\"last_wake_ms\":" + std::to_string(lastStepperWakeMs) +
             ",\"last_idle_ms\":" + std::to_string(lastStepperIdleMs) +
+            "},\"i2s\":{\"underruns\":" + std::to_string(i2s.underruns) +
+            ",\"max_isr_gap_us\":" + std::to_string(i2s.max_isr_gap_us) +
+            ",\"max_isr_duration_us\":" + std::to_string(i2s.max_isr_duration_us) +
+            ",\"planner_active\":" + (i2s.planner_active ? "true" : "false") +
+            ",\"planner_interval_ticks\":" + std::to_string(i2s.planner_interval_ticks) +
+            ",\"planner_interval_frames\":" + std::to_string(i2s.planner_interval_frames) +
+            ",\"planner_fractional_residual_ticks\":" + std::to_string(i2s.planner_fractional_residual_ticks) +
+            ",\"planner_scheduled_ticks\":" + std::to_string(i2s.planner_scheduled_ticks) +
+            ",\"planner_emitted_frames\":" + std::to_string(i2s.planner_emitted_frames) +
+            ",\"planner_emitted_intervals\":" + std::to_string(i2s.planner_emitted_intervals) +
+            "},\"c_planner\":{\"steps\":" + std::to_string(Machine::Stepping::getSteps(cAxis)) +
+            ",\"position_degrees\":" + std::to_string(get_mpos()[cAxis]) +
             "},\"input\":{\"line_count\":" + std::to_string(lineCount) +
             ",\"jog_count\":" + std::to_string(jogCount) +
             ",\"home_count\":" + std::to_string(homeCount) +

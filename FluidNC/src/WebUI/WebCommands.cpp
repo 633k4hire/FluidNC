@@ -22,7 +22,6 @@
 #include "MotionControl.h"
 #include "Planner.h"
 #include "Stepper.h"
-#include "Stepping.h"
 #include "DialFirmwareClient.h"
 #include "Machine/Homing.h"
 #include "Spindles/Spindle.h"
@@ -877,15 +876,6 @@ namespace WebUI {
             j.id_value_object("I2S underruns", int32_t(i2s_diagnostics.underruns));
             j.id_value_object("I2S max ISR gap us", int32_t(i2s_diagnostics.max_isr_gap_us));
             j.id_value_object("I2S max ISR duration us", int32_t(i2s_diagnostics.max_isr_duration_us));
-            j.id_value_object("Planner timing active", i2s_diagnostics.planner_active ? "true" : "false");
-            j.id_value_object("Planner interval ticks", int32_t(i2s_diagnostics.planner_interval_ticks));
-            j.id_value_object("Planner interval frames", int32_t(i2s_diagnostics.planner_interval_frames));
-            j.id_value_object("Planner fractional residual ticks", int32_t(i2s_diagnostics.planner_fractional_residual_ticks));
-            j.id_value_object("Planner scheduled ticks", int32_t(i2s_diagnostics.planner_scheduled_ticks));
-            j.id_value_object("Planner emitted frames", int32_t(i2s_diagnostics.planner_emitted_frames));
-            j.id_value_object("Planner emitted intervals", int32_t(i2s_diagnostics.planner_emitted_intervals));
-            j.id_value_object("C planner steps", int32_t(Machine::Stepping::getSteps(Lathe::c_axis())));
-            j.id_value_object("C planner position degrees", float_string(get_mpos()[Lathe::c_axis()]));
             j.id_value_object("C pulse requested Hz", float_string(i2s_diagnostics.requested_rate_millihz / 1000.0f));
             j.id_value_object("C pulse emitted Hz", float_string(i2s_diagnostics.emitted_rate_millihz / 1000.0f));
             j.id_value_object("C pulse emitted count", int32_t(i2s_diagnostics.emitted_pulses));
