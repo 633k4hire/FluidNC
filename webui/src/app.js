@@ -56,7 +56,7 @@ function setPage(name){
   $$("nav button").forEach(element=>element.classList.toggle("active",element.dataset.page===name));
   if(name==="settings"&&!state.settings.length)refreshSettings();
   if(name==="files")refreshFiles();
-  if(name==="firmware"||name==="diagnostics")refreshFirmware();
+  if(name==="firmware")refreshFirmware();
 }
 $$("nav button").forEach(button=>button.onclick=()=>setPage(button.dataset.page));
 
@@ -449,7 +449,7 @@ function refreshFirmware(){
   return firmwareRefreshInFlight;
 }
 async function firmwarePoll(){
-  const firmwareVisible=$("#page-firmware").classList.contains("active")||$("#page-diagnostics").classList.contains("active");
+  const firmwareVisible=$("#page-firmware").classList.contains("active");
   if(firmwareVisible&&document.visibilityState==="visible")await refreshFirmware();
   setTimeout(firmwarePoll,5000);
 }

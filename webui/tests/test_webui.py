@@ -90,8 +90,10 @@ class WebUiTests(unittest.TestCase):
         self.assertIn('jsonFetchTimeout("/api/v1/firmware/receipts",{},2500)', self.html)
         self.assertIn("if(firmwareRefreshInFlight)return firmwareRefreshInFlight", self.html)
         self.assertIn("return firmwareRefreshInFlight", self.html)
+        self.assertIn('if(name==="firmware")refreshFirmware()', self.html)
+        self.assertNotIn('if(name==="firmware"||name==="diagnostics")refreshFirmware()', self.html)
         self.assertIn('$("#page-firmware").classList.contains("active")', self.html)
-        self.assertIn('$("#page-diagnostics").classList.contains("active")', self.html)
+        self.assertNotIn('$("#page-diagnostics").classList.contains("active")', self.html)
         self.assertIn("setTimeout(firmwarePoll,5000)", self.html)
         self.assertNotIn("setInterval(refreshFirmware,5000)", self.html)
 
