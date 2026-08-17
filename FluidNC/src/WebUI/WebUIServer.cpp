@@ -43,10 +43,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <deque>
 #include <cctype>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "Mime.h"  // getContentType
@@ -115,11 +115,45 @@ namespace {
     constexpr size_t        FirmwareRelayChunkSize  = 4096;
     constexpr size_t        FirmwareBodyLimit       = 8192;
     constexpr size_t        FirmwareReceiptMaxBytes = 2048;
+    constexpr size_t        FirmwareReceiptMaxCount = 16;
+    constexpr size_t        FirmwareReceiptMaxTotalBytes = 8192;
     constexpr const char*   FirmwareReceiptPath     = "/firmware-receipts.jsonl";
     constexpr const char*   FirmwareReceiptTempPath = "/firmware-receipts.tmp";
     constexpr const char*   FirmwareReceiptBackupPath = "/firmware-receipts.bak";
-    std::deque<std::string> firmwareReceipts;
-    bool                    firmwareReceiptsLoaded = false;
+    using FirmwareReceipt = std::shared_ptr<const std::string>;
+    std::array<FirmwareReceipt, FirmwareReceiptMaxCount> firmwareReceipts;
+    std::mutex                                           firmwareReceiptsMutex;
+    size_t                                               firmwareReceiptStart = 0;
+    size_t                                               firmwareReceiptCount = 0;
+    size_t                                               firmwareReceiptBytes = 0;
+    bool                                                 firmwareReceiptsLoaded = false;
+
+    bool persistFirmwareReceipts();
+
+    const FirmwareReceipt& firmwareReceiptAt(size_t index) {
+        return firmwareReceipts[(firmwareReceiptStart + index) % FirmwareReceiptMaxCount];
+    }
+
+    void clearFirmwareReceipts() {
+        for (auto& receipt : firmwareReceipts) receipt.reset();
+        firmwareReceiptStart = 0;
+        firmwareReceiptCount = 0;
+        firmwareReceiptBytes = 0;
+    }
+
+    void popOldestFirmwareReceipt() {
+        firmwareReceiptBytes -= firmwareReceipts[firmwareReceiptStart]->size();
+        firmwareReceipts[firmwareReceiptStart].reset();
+        firmwareReceiptStart = (firmwareReceiptStart + 1) % FirmwareReceiptMaxCount;
+        --firmwareReceiptCount;
+    }
+
+    void pushNewestFirmwareReceipt(FirmwareReceipt receipt) {
+        const size_t index = (firmwareReceiptStart + firmwareReceiptCount) % FirmwareReceiptMaxCount;
+        firmwareReceiptBytes += receipt->size();
+        firmwareReceipts[index] = std::move(receipt);
+        ++firmwareReceiptCount;
+    }
 
     std::string jsonEscape(const std::string& input) {
         std::string out;
@@ -331,6 +365,7 @@ namespace {
     }
 
     void loadFirmwareReceipts() {
+        std::lock_guard<std::mutex> guard(firmwareReceiptsMutex);
         if (firmwareReceiptsLoaded) return;
         firmwareReceiptsLoaded = true;
         try {
@@ -346,7 +381,15 @@ namespace {
                 int value = input.read();
                 if (value < 0) break;
                 if (value == '\n') {
-                    if (!overflow && !current.empty()) firmwareReceipts.push_back(current);
+                    if (!overflow && !current.empty()) {
+                        auto receipt = std::make_shared<const std::string>(std::move(current));
+                        while (firmwareReceiptCount &&
+                               (firmwareReceiptCount >= FirmwareReceiptMaxCount ||
+                                firmwareReceiptBytes + receipt->size() > FirmwareReceiptMaxTotalBytes)) {
+                            popOldestFirmwareReceipt();
+                        }
+                        pushNewestFirmwareReceipt(std::move(receipt));
+                    }
                     current.clear();
                     overflow = false;
                 } else if (value != '\r') {
@@ -354,11 +397,49 @@ namespace {
                     else overflow = true;
                 }
             }
-            if (!overflow && !current.empty()) firmwareReceipts.push_back(current);
-            while (firmwareReceipts.size() > 16) firmwareReceipts.pop_front();
+            if (!overflow && !current.empty()) {
+                auto receipt = std::make_shared<const std::string>(std::move(current));
+                while (firmwareReceiptCount &&
+                       (firmwareReceiptCount >= FirmwareReceiptMaxCount ||
+                        firmwareReceiptBytes + receipt->size() > FirmwareReceiptMaxTotalBytes)) {
+                    popOldestFirmwareReceipt();
+                }
+                pushNewestFirmwareReceipt(std::move(receipt));
+            }
         } catch (...) {
-            firmwareReceipts.clear();
+            clearFirmwareReceipts();
         }
+    }
+
+    bool storeFirmwareReceipt(std::string receipt) {
+        if (receipt.size() > FirmwareReceiptMaxBytes) return false;
+
+        FirmwareReceipt stored;
+        try {
+            stored = std::make_shared<const std::string>(std::move(receipt));
+        } catch (...) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> guard(firmwareReceiptsMutex);
+        const auto   previousReceipts = firmwareReceipts;
+        const size_t previousStart    = firmwareReceiptStart;
+        const size_t previousCount    = firmwareReceiptCount;
+        const size_t previousBytes    = firmwareReceiptBytes;
+        while (firmwareReceiptCount &&
+               (firmwareReceiptCount >= FirmwareReceiptMaxCount ||
+                firmwareReceiptBytes + stored->size() > FirmwareReceiptMaxTotalBytes)) {
+            popOldestFirmwareReceipt();
+        }
+
+        pushNewestFirmwareReceipt(std::move(stored));
+        if (persistFirmwareReceipts()) return true;
+
+        firmwareReceipts    = previousReceipts;
+        firmwareReceiptStart = previousStart;
+        firmwareReceiptCount = previousCount;
+        firmwareReceiptBytes = previousBytes;
+        return false;
     }
 
     bool persistFirmwareReceipts() {
@@ -366,8 +447,9 @@ namespace {
             FluidPath temp(FirmwareReceiptTempPath, LocalFS);
             {
                 FileStream output(temp, "w");
-                for (const auto& line : firmwareReceipts) {
-                    output.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
+                for (size_t index = 0; index < firmwareReceiptCount; ++index) {
+                    const auto& line = firmwareReceiptAt(index);
+                    output.write(reinterpret_cast<const uint8_t*>(line->data()), line->size());
                     output.write(static_cast<uint8_t>('\n'));
                 }
             }
@@ -431,18 +513,7 @@ namespace {
                                "\",\"started_uptime_ms\":" + std::to_string(deployment.startedAt) +
                                ",\"recorded_uptime_ms\":" + std::to_string(millis()) +
                                ",\"receipt_persisted\":true}";
-        if (receipt.size() > FirmwareReceiptMaxBytes) return false;
-        std::string removed;
-        bool removedOldest = firmwareReceipts.size() >= 16;
-        if (removedOldest) {
-            removed = firmwareReceipts.front();
-            firmwareReceipts.pop_front();
-        }
-        firmwareReceipts.push_back(receipt);
-        if (persistFirmwareReceipts()) return true;
-        if (!firmwareReceipts.empty()) firmwareReceipts.pop_back();
-        if (removedOldest) firmwareReceipts.push_front(removed);
-        return false;
+        return storeFirmwareReceipt(std::move(receipt));
     }
 
     bool appendControllerFirmwareReceipt() {
@@ -463,18 +534,7 @@ namespace {
             "\",\"rollback_recovery\":\"previous_ota_slot\",\"started_uptime_ms\":" +
             std::to_string(controllerDeployment.startedAt) + ",\"recorded_uptime_ms\":" +
             std::to_string(millis()) + ",\"receipt_persisted\":true}";
-        if (receipt.size() > FirmwareReceiptMaxBytes) return false;
-        std::string removed;
-        bool removedOldest = firmwareReceipts.size() >= 16;
-        if (removedOldest) {
-            removed = firmwareReceipts.front();
-            firmwareReceipts.pop_front();
-        }
-        firmwareReceipts.push_back(receipt);
-        if (persistFirmwareReceipts()) return true;
-        if (!firmwareReceipts.empty()) firmwareReceipts.pop_back();
-        if (removedOldest) firmwareReceipts.push_front(removed);
-        return false;
+        return storeFirmwareReceipt(std::move(receipt));
     }
 
     std::string controllerDeploymentJson() {
@@ -565,6 +625,27 @@ namespace {
         uint8_t                   percent        = 100;
         bool                      emit_files     = false;
         JSONencoder               encoder;
+    };
+
+    struct FirmwareReceiptChunkState {
+        FirmwareReceiptChunkState(
+            const std::array<FirmwareReceipt, FirmwareReceiptMaxCount>& source,
+            size_t sourceStart,
+            size_t sourceCount) {
+            while (receiptCount < sourceCount && receiptCount < receipts.size()) {
+                const size_t sourceIndex = (sourceStart + sourceCount - 1 - receiptCount) % FirmwareReceiptMaxCount;
+                receipts[receiptCount] = source[sourceIndex];
+                ++receiptCount;
+            }
+        }
+
+        std::array<FirmwareReceipt, FirmwareReceiptMaxCount> receipts;
+        size_t receiptCount   = 0;
+        size_t receiptIndex   = 0;
+        size_t receiptOffset  = 0;
+        bool   opened         = false;
+        bool   separatorSent  = false;
+        bool   closed         = false;
     };
 
     int32_t file_entry_size(const stdfs::directory_entry& dir_entry) {
@@ -2074,15 +2155,57 @@ namespace WebUI {
             return;
         }
         loadFirmwareReceipts();
-        std::string json = "[";
-        bool        first = true;
-        for (auto it = firmwareReceipts.rbegin(); it != firmwareReceipts.rend(); ++it) {
-            if (!first) json += ",";
-            json += *it;
-            first = false;
+        std::shared_ptr<FirmwareReceiptChunkState> state;
+        AsyncWebServerResponse* response = nullptr;
+        try {
+            {
+                std::lock_guard<std::mutex> guard(firmwareReceiptsMutex);
+                state = std::make_shared<FirmwareReceiptChunkState>(
+                    firmwareReceipts,
+                    firmwareReceiptStart,
+                    firmwareReceiptCount);
+            }
+            response = request->beginChunkedResponse(
+                "application/json",
+                [state](uint8_t* buffer, size_t maxLen, size_t total) mutable -> size_t {
+                    (void)total;
+                    size_t written = 0;
+                    while (written < maxLen) {
+                        if (!state->opened) {
+                            buffer[written++] = '[';
+                            state->opened = true;
+                            continue;
+                        }
+                        if (state->receiptIndex < state->receiptCount) {
+                            if (state->receiptIndex && !state->separatorSent) {
+                                buffer[written++] = ',';
+                                state->separatorSent = true;
+                                continue;
+                            }
+                            const auto& receipt = *state->receipts[state->receiptIndex];
+                            const size_t count = std::min(maxLen - written, receipt.size() - state->receiptOffset);
+                            memcpy(buffer + written, receipt.data() + state->receiptOffset, count);
+                            written += count;
+                            state->receiptOffset += count;
+                            if (state->receiptOffset == receipt.size()) {
+                                ++state->receiptIndex;
+                                state->receiptOffset = 0;
+                                state->separatorSent = false;
+                            }
+                            continue;
+                        }
+                        if (!state->closed) {
+                            buffer[written++] = ']';
+                            state->closed = true;
+                        }
+                        break;
+                    }
+                    return written;
+                });
+        } catch (...) {
+            request->send(503, "application/json", "{\"error\":\"firmware receipt history is temporarily unavailable\"}");
+            return;
         }
-        json += "]";
-        AsyncWebServerResponse* response = request->beginResponse(200, "application/json", json.c_str());
         response->addHeader(T_Cache_Control, T_no_cache);
         if (request->hasParam("download")) {
             response->addHeader("Content-Disposition", "attachment; filename=\"firmware-receipts.json\"");

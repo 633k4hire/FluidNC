@@ -56,6 +56,7 @@ function setPage(name){
   $$("nav button").forEach(element=>element.classList.toggle("active",element.dataset.page===name));
   if(name==="settings"&&!state.settings.length)refreshSettings();
   if(name==="files")refreshFiles();
+  if(name==="firmware"||name==="diagnostics")refreshFirmware();
 }
 $$("nav button").forEach(button=>button.onclick=()=>setPage(button.dataset.page));
 
@@ -424,9 +425,11 @@ function updateFirmwareButtons(){
   $("#update-controller").dataset.serverDisabled=String(controllerDisabled&&!state.locked);$("#update-controller").disabled=controllerDisabled;
   $("#pair-dial").disabled=state.locked||!!(dial.paired&&dial.online);
 }
-async function refreshFirmware(){
-  try{
-    const data=await jsonFetch("/api/v1/firmware/devices");state.firmware=data;
+let firmwareRefreshInFlight=null;
+function refreshFirmware(){
+  if(firmwareRefreshInFlight)return firmwareRefreshInFlight;
+  firmwareRefreshInFlight=(async()=>{try{
+    const data=await jsonFetchTimeout("/api/v1/firmware/devices",{},2500);state.firmware=data;
     const controller=data.controller||{},dial=data.m5dial||{};
     $("#controller-id").textContent=controller.device_id||"—";$("#controller-version").textContent=controller.version||"—";$("#controller-slot").textContent=controller.inactive_partition||"—";
     $("#dial-online").textContent=dial.online?"Online":dial.paired?"Offline":"Not paired";$("#dial-online").className=`pill ${dial.online?"good":""}`;
@@ -437,11 +440,18 @@ async function refreshFirmware(){
     $("#diag-maintenance").textContent=data.maintenance_lock?"Active":"Inactive";
     if(!data.trust_configured)$("#dial-update-reason").textContent="Production signing trust is not configured.";
     updateFirmwareButtons();
-    const receipts=await jsonFetch("/api/v1/firmware/receipts").catch(()=>[]);
+    const receipts=await jsonFetchTimeout("/api/v1/firmware/receipts",{},2500).catch(()=>[]);
     const controllerReceipt=receipts.find(receipt=>receipt.target==="fluidnc_controller"),dialReceipt=receipts.find(receipt=>receipt.target==="m5dial");
     if(controllerReceipt)$("#last-controller-receipt").textContent=JSON.stringify(controllerReceipt,null,2);
     if(dialReceipt)$("#last-dial-receipt").textContent=JSON.stringify(dialReceipt,null,2);
   }catch(error){$("#firmware-safety").textContent=`Firmware service unavailable: ${error.message}`;}
+  })().finally(()=>{firmwareRefreshInFlight=null;});
+  return firmwareRefreshInFlight;
+}
+async function firmwarePoll(){
+  const firmwareVisible=$("#page-firmware").classList.contains("active")||$("#page-diagnostics").classList.contains("active");
+  if(firmwareVisible&&document.visibilityState==="visible")await refreshFirmware();
+  setTimeout(firmwarePoll,5000);
 }
 
 async function deploy(kind){
@@ -544,7 +554,7 @@ $("#refresh-diagnostics").onclick=refreshStatus;
 toolRows();renderStations($("#turret-stations"));renderStations($("#turret-control-stations"),null,null,true);
 (async()=>{
   await initializeConsole();
-  await Promise.all([refreshStatus(),refreshFirmware()]);
+  await refreshStatus();
   setTimeout(statusPoll,1500);
-  setInterval(refreshFirmware,5000);
+  setTimeout(firmwarePoll,5000);
 })();

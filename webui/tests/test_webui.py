@@ -86,6 +86,14 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("function jsonFetchTimeout(url,options={},timeoutMs=2500)", self.html)
         self.assertIn("controller.abort()", self.html)
         self.assertNotIn("setInterval(refreshStatus,1500)", self.html)
+        self.assertIn('jsonFetchTimeout("/api/v1/firmware/devices",{},2500)', self.html)
+        self.assertIn('jsonFetchTimeout("/api/v1/firmware/receipts",{},2500)', self.html)
+        self.assertIn("if(firmwareRefreshInFlight)return firmwareRefreshInFlight", self.html)
+        self.assertIn("return firmwareRefreshInFlight", self.html)
+        self.assertIn('$("#page-firmware").classList.contains("active")', self.html)
+        self.assertIn('$("#page-diagnostics").classList.contains("active")', self.html)
+        self.assertIn("setTimeout(firmwarePoll,5000)", self.html)
+        self.assertNotIn("setInterval(refreshFirmware,5000)", self.html)
 
     def test_radial_jog_and_visual_spindle_are_distinct(self):
         self.assertIn('class="radial-jog"', self.html)
@@ -207,10 +215,21 @@ class WebUiTests(unittest.TestCase):
 
     def test_receipts_are_capped_and_persisted(self):
         self.assertIn("firmware-receipts.jsonl", self.server)
-        self.assertIn("firmwareReceipts.size() > 16", self.server)
+        self.assertIn("FirmwareReceiptMaxCount = 16", self.server)
         self.assertIn("stdfs::rename", self.server)
         self.assertIn("firmware-receipts.bak", self.server)
         self.assertIn("FirmwareReceiptMaxBytes = 2048", self.server)
+        self.assertIn("FirmwareReceiptMaxTotalBytes = 8192", self.server)
+        self.assertIn("storeFirmwareReceipt(std::move(receipt))", self.server)
+        receipts = self.server.split("void WebUI_Server::handleFirmwareReceipts", 1)[1].split(
+            "void WebUI_Server::handleFirmwarePairStart", 1
+        )[0]
+        self.assertIn("beginChunkedResponse", receipts)
+        self.assertNotIn('std::string json = "["', receipts)
+        self.assertIn("firmware receipt history is temporarily unavailable", receipts)
+        self.assertIn("state->receipts[state->receiptIndex]", receipts)
+        self.assertNotIn("firmwareReceipts[state->", receipts)
+        self.assertIn("firmwareReceiptsMutex", self.server)
 
     def test_maintenance_lock_reaches_all_line_oriented_channels(self):
         self.assertIn("firmwareMaintenanceActive()", self.protocol)
