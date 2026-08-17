@@ -13,6 +13,7 @@
 #include "Driver/step_engine.h"
 #include "Driver/i2s_out.h"
 #include "Driver/i2s_frame_compositor.h"
+#include "Driver/i2s_fractional_timing.h"
 #include "Driver/StepTimer.h"
 #include "hal/i2s_hal.h"
 
@@ -324,8 +325,7 @@ static uint32_t _remaining_direction_counts = 0;
 static volatile uint32_t _pending_direction_counts = 0;
 
 static uint32_t _pulse_data;
-static uint32_t _delay_counts = 40;
-static uint32_t _tick_divisor;
+static i2s_fractional_timing_t _planner_frame_timing;
 
 // A low-rate auxiliary pulse stream can be merged into every I2S sample.
 // The normal planner still owns _pulse_data; this overlay only changes its
@@ -357,8 +357,18 @@ static uint32_t aux_phase_increment_for_rate(uint32_t rate_millihz) {
 
 static void IRAM_ATTR set_timer_ticks(uint32_t ticks) {
     if (ticks) {
-        _delay_counts = ticks / _tick_divisor;
+        i2s_fractional_timing_set_interval(&_planner_frame_timing, ticks);
     }
+}
+
+static uint32_t IRAM_ATTR next_planner_interval_frames(bool callback_active) {
+    const uint32_t frames = i2s_fractional_timing_next(&_planner_frame_timing);
+    if (!callback_active) {
+        // The final interval consumes the existing residual. Idle callbacks
+        // start from zero, so no fractional state crosses planner motions.
+        i2s_fractional_timing_reset(&_planner_frame_timing);
+    }
+    return frames;
 }
 
 static void IRAM_ATTR start_timer() {
@@ -373,6 +383,7 @@ static void IRAM_ATTR stop_timer() {
         i2s_ll_enable_intr(&I2S0, I2S_TX_PUT_DATA_INT_ENA, 0);
         timer_running = false;
     }
+    i2s_fractional_timing_reset(&_planner_frame_timing);
 }
 
 static void IRAM_ATTR i2s_isr() {
@@ -427,10 +438,13 @@ static void IRAM_ATTR i2s_isr() {
                 --remaining_delay_counts;
             } else {
                 _pulse_data = i2s_out_port_data;
-                _pulse_func();
+                const bool callback_active = _pulse_func();
                 pulse_data             = _pulse_data;
                 remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
-                remaining_delay_counts = _delay_counts - remaining_pulse_counts;
+                const uint32_t interval_frames = next_planner_interval_frames(callback_active);
+                remaining_delay_counts = interval_frames > remaining_pulse_counts
+                                             ? interval_frames - remaining_pulse_counts
+                                             : 0;
                 if (_pending_direction_counts) {
                     remaining_direction_counts = _pending_direction_counts;
                     _pending_direction_counts  = 0;
@@ -462,10 +476,13 @@ static void IRAM_ATTR i2s_isr() {
                 --remaining_delay_counts;
             } else {
                 _pulse_data = i2s_out_port_data;
-                _pulse_func();
+                const bool callback_active = _pulse_func();
                 pulse_data             = _pulse_data;
                 remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
-                remaining_delay_counts = _delay_counts - remaining_pulse_counts;
+                const uint32_t interval_frames = next_planner_interval_frames(callback_active);
+                remaining_delay_counts = interval_frames > remaining_pulse_counts
+                                             ? interval_frames - remaining_pulse_counts
+                                             : 0;
                 if (_pending_direction_counts) {
                     remaining_direction_counts = _pending_direction_counts;
                     _pending_direction_counts  = 0;
@@ -515,7 +532,7 @@ static uint32_t init_engine(uint32_t dir_delay_us, uint32_t pulse_us, uint32_t f
     }
     _dir_delay_us = dir_delay_us;
     _pulse_counts = (pulse_us + i2s_frame_us - 1) / i2s_frame_us;
-    _tick_divisor = frequency * i2s_frame_us / 1000000;
+    i2s_fractional_timing_init(&_planner_frame_timing, frequency * i2s_frame_us / 1000000);
 
     _remaining_pulse_counts = 0;
     _remaining_delay_counts = 0;
@@ -525,8 +542,8 @@ static uint32_t init_engine(uint32_t dir_delay_us, uint32_t pulse_us, uint32_t f
     // gpio_mode(12, 0, 1, 0, 0, 0);
 
     // Run the pulser all the time to pick up writes to non-stepping I2S outputs
-    start_timer();
     set_timer_ticks(100);
+    start_timer();
 
     return _pulse_counts * i2s_frame_us;
 }
