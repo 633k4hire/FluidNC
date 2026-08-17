@@ -92,9 +92,16 @@ typedef struct {
     uint32_t underruns;
     uint32_t max_isr_gap_us;
     uint32_t max_isr_duration_us;
+    uint32_t planner_interval_ticks;
+    uint32_t planner_interval_frames;
+    uint32_t planner_fractional_residual_ticks;
+    uint32_t planner_scheduled_ticks;
+    uint32_t planner_emitted_frames;
+    uint32_t planner_emitted_intervals;
     uint32_t requested_rate_millihz;
     uint32_t emitted_rate_millihz;
     uint32_t emitted_pulses;
+    bool     planner_active;
     bool     aux_faulted;
 } i2s_out_diagnostics_t;
 

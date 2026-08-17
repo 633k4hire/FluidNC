@@ -341,12 +341,27 @@ static uint32_t          _aux_pulse_frames_remaining = 0;
 static volatile bool     _aux_fault_pending          = false;
 static volatile bool     _aux_faulted                = false;
 
-static volatile uint32_t _diag_underruns             = 0;
-static volatile uint32_t _diag_max_isr_gap_cycles    = 0;
+static volatile uint32_t _diag_underruns                 = 0;
+static volatile uint32_t _diag_max_isr_gap_cycles        = 0;
 static volatile uint32_t _diag_max_isr_duration_cycles = 0;
-static volatile uint32_t _diag_last_isr_cycle        = 0;
-static int64_t           _aux_started_us             = 0;
-static int64_t           _aux_stopped_us             = 0;
+static volatile uint32_t _diag_last_isr_cycle            = 0;
+
+// The I2S ISR is the only writer. Task context reads this snapshot only after
+// the planner reaches Idle, so these diagnostic-only counters need no volatile
+// barriers in the interval hot path.
+typedef struct {
+    uint32_t interval_ticks;
+    uint32_t interval_frames;
+    uint32_t fractional_residual_ticks;
+    uint32_t scheduled_ticks;
+    uint32_t emitted_frames;
+    uint32_t emitted_intervals;
+    bool     active;
+} i2s_planner_diagnostics_state_t;
+
+static i2s_planner_diagnostics_state_t _diag_planner = { 0 };
+static int64_t                         _aux_started_us = 0;
+static int64_t                         _aux_stopped_us = 0;
 
 // Called only from foreground/task context.  No division is permitted in the
 // high-frequency I2S ISR that consumes this precomputed DDS increment.
@@ -358,12 +373,28 @@ static uint32_t aux_phase_increment_for_rate(uint32_t rate_millihz) {
 static void IRAM_ATTR set_timer_ticks(uint32_t ticks) {
     if (ticks) {
         i2s_fractional_timing_set_interval(&_planner_frame_timing, ticks);
+        _diag_planner.interval_ticks = ticks;
     }
 }
 
 static uint32_t IRAM_ATTR next_planner_interval_frames(bool callback_active) {
     const uint32_t frames = i2s_fractional_timing_next(&_planner_frame_timing);
-    if (!callback_active) {
+    if (callback_active) {
+        if (!_diag_planner.active) {
+            // Retain the completed run until the first active callback of the
+            // next run, so task-context diagnostics can inspect it at Idle.
+            _diag_planner.scheduled_ticks   = 0;
+            _diag_planner.emitted_frames    = 0;
+            _diag_planner.emitted_intervals = 0;
+            _diag_planner.active            = true;
+        }
+        _diag_planner.interval_frames           = frames;
+        _diag_planner.fractional_residual_ticks = _planner_frame_timing.residual_ticks;
+        _diag_planner.scheduled_ticks += _planner_frame_timing.interval_ticks;
+        _diag_planner.emitted_frames += frames;
+        ++_diag_planner.emitted_intervals;
+    } else {
+        _diag_planner.active = false;
         // The final interval consumes the existing residual. Idle callbacks
         // start from zero, so no fractional state crosses planner motions.
         i2s_fractional_timing_reset(&_planner_frame_timing);
@@ -698,13 +729,20 @@ void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
             emitted_rate = (uint32_t)(((uint64_t)emitted * 1000000000ULL) / (uint64_t)elapsed_us);
         }
     }
-    diagnostics->fifo_threshold            = _fifo_threshold;
-    diagnostics->fifo_reload               = _fifo_reload;
-    diagnostics->underruns                 = _diag_underruns;
-    diagnostics->max_isr_gap_us            = _diag_max_isr_gap_cycles / CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
-    diagnostics->max_isr_duration_us       = _diag_max_isr_duration_cycles / CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
-    diagnostics->requested_rate_millihz    = _aux_current_rate_millihz;
-    diagnostics->emitted_rate_millihz      = emitted_rate;
-    diagnostics->emitted_pulses            = emitted;
-    diagnostics->aux_faulted               = _aux_faulted;
+    diagnostics->fifo_threshold          = _fifo_threshold;
+    diagnostics->fifo_reload             = _fifo_reload;
+    diagnostics->underruns               = _diag_underruns;
+    diagnostics->max_isr_gap_us          = _diag_max_isr_gap_cycles / CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
+    diagnostics->max_isr_duration_us     = _diag_max_isr_duration_cycles / CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
+    diagnostics->planner_interval_ticks  = _diag_planner.interval_ticks;
+    diagnostics->planner_interval_frames = _diag_planner.interval_frames;
+    diagnostics->planner_fractional_residual_ticks = _diag_planner.fractional_residual_ticks;
+    diagnostics->planner_scheduled_ticks          = _diag_planner.scheduled_ticks;
+    diagnostics->planner_emitted_frames           = _diag_planner.emitted_frames;
+    diagnostics->planner_emitted_intervals        = _diag_planner.emitted_intervals;
+    diagnostics->requested_rate_millihz           = _aux_current_rate_millihz;
+    diagnostics->emitted_rate_millihz             = emitted_rate;
+    diagnostics->emitted_pulses                   = emitted;
+    diagnostics->planner_active                   = _diag_planner.active;
+    diagnostics->aux_faulted                      = _aux_faulted;
 }
