@@ -72,19 +72,13 @@ void i2s_out_write(pinnum_t pin, uint8_t val);
  */
 void i2s_out_delay();
 
-// Optional continuous step stream overlaid on the normal I2S step engine.
-// Rate ramps and position accounting stay in foreground code.  The ISR only
-// consumes the precomputed rate and counts emitted pulses.
-bool i2s_out_aux_step_start(pinnum_t step_pin,
-                            bool step_invert,
-                            pinnum_t dir_pin,
-                            bool dir_level,
-                            uint32_t initial_rate_millihz);
-void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz);
-void i2s_out_aux_step_stop(bool immediate);
-bool i2s_out_aux_step_active();
-uint32_t i2s_out_aux_step_current_rate_millihz();
-uint32_t i2s_out_aux_step_pulse_count();
+// Arms fault monitoring while continuous C shares the normal planner callback.
+// This transport API never generates or overlays step pulses of its own.
+bool i2s_out_continuous_transport_start();
+void i2s_out_continuous_transport_stop();
+bool i2s_out_continuous_transport_active();
+bool i2s_out_continuous_transport_faulted();
+bool i2s_out_continuous_transport_take_fault();
 
 typedef struct {
     uint32_t fifo_threshold;
@@ -98,15 +92,11 @@ typedef struct {
     uint32_t planner_scheduled_ticks;
     uint32_t planner_emitted_frames;
     uint32_t planner_emitted_intervals;
-    uint32_t requested_rate_millihz;
-    uint32_t emitted_rate_millihz;
-    uint32_t emitted_pulses;
     bool     planner_active;
-    bool     aux_faulted;
+    bool     transport_faulted;
 } i2s_out_diagnostics_t;
 
 void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics);
-bool i2s_out_aux_step_take_fault();
 
 /*
    Reference: "ESP32 Technical Reference Manual" by Espressif Systems

@@ -22,6 +22,7 @@
 #include "MotionControl.h"
 #include "Planner.h"
 #include "Stepper.h"
+#include "Stepping.h"
 #include "DialFirmwareClient.h"
 #include "Machine/Homing.h"
 #include "Spindles/Spindle.h"
@@ -864,7 +865,7 @@ namespace WebUI {
             i2s_out_diagnostics_t i2s_diagnostics = {};
             i2s_out_get_diagnostics(&i2s_diagnostics);
             const auto shared_chuck_mode = Lathe::shared_chuck_mode();
-            const char* c_pulse_ownership = i2s_diagnostics.aux_faulted
+            const char* c_pulse_ownership = Machine::Stepping::continuousFaulted()
                                                 ? "FAULT"
                                                 : shared_chuck_mode == Lathe::SharedChuckMode::Spindle
                                                       ? "SPINDLE"
@@ -876,9 +877,9 @@ namespace WebUI {
             j.id_value_object("I2S underruns", int32_t(i2s_diagnostics.underruns));
             j.id_value_object("I2S max ISR gap us", int32_t(i2s_diagnostics.max_isr_gap_us));
             j.id_value_object("I2S max ISR duration us", int32_t(i2s_diagnostics.max_isr_duration_us));
-            j.id_value_object("C pulse requested Hz", float_string(i2s_diagnostics.requested_rate_millihz / 1000.0f));
-            j.id_value_object("C pulse emitted Hz", float_string(i2s_diagnostics.emitted_rate_millihz / 1000.0f));
-            j.id_value_object("C pulse emitted count", int32_t(i2s_diagnostics.emitted_pulses));
+            j.id_value_object("C pulse requested Hz", float_string(Machine::Stepping::continuousTargetRateMillihz() / 1000.0f));
+            j.id_value_object("C pulse scheduled Hz", float_string(Machine::Stepping::continuousRateMillihz() / 1000.0f));
+            j.id_value_object("C pulse emitted count", int32_t(Machine::Stepping::continuousPulseCount()));
             j.id_value_object("C pulse ownership", c_pulse_ownership);
             j.id_value_object("C reference", spindle->cReferenceName());
             j.id_value_object("Threading enabled", Lathe::feature_enabled(Lathe::Feature::Threading) ? "true" : "false");

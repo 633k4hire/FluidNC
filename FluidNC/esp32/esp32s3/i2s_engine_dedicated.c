@@ -159,20 +159,15 @@ void IRAM_ATTR i2s_out_write(pinnum_t pin, uint8_t val) {
 }
 
 // The ESP32-S3 dedicated I2S engine does not yet support the auxiliary
-// continuous-step overlay used by the classic-ESP32 Maijker controller.
-bool i2s_out_aux_step_start(pinnum_t step_pin,
-                            bool step_invert,
-                            pinnum_t dir_pin,
-                            bool dir_level,
-                            uint32_t initial_rate_millihz) {
+// Planner-integrated continuous C is currently supported only by the classic
+// ESP32 Maijker transport.
+bool i2s_out_continuous_transport_start() {
     return false;
 }
-void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz) {}
-void i2s_out_aux_step_stop(bool immediate) {}
-bool i2s_out_aux_step_active() { return false; }
-uint32_t i2s_out_aux_step_current_rate_millihz() { return 0; }
-uint32_t i2s_out_aux_step_pulse_count() { return 0; }
-bool i2s_out_aux_step_take_fault() { return false; }
+void i2s_out_continuous_transport_stop() {}
+bool i2s_out_continuous_transport_active() { return false; }
+bool i2s_out_continuous_transport_faulted() { return false; }
+bool i2s_out_continuous_transport_take_fault() { return false; }
 void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
     if (diagnostics) {
         *diagnostics = (i2s_out_diagnostics_t){ 0 };

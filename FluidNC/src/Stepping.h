@@ -5,6 +5,7 @@
 #pragma once
 
 #include "Configuration/Configurable.h"
+#include "ContinuousEventScheduler.h"
 #include "Driver/step_engine.h"
 #include "System.h"
 
@@ -41,6 +42,42 @@ namespace Machine {
         static uint32_t        _continuousAccelerationMillihzPerSec;
         static uint32_t        _continuousLastRampMs;
         static uint32_t        _continuousRampRemainder;
+        static uint32_t        _continuousPublishedRateMillihz;
+        static uint32_t        _continuousPlannerPeakPulsesPerSec;
+
+        struct continuous_rate_mailbox_t {
+            volatile uint32_t sequence;
+            volatile uint32_t rate_millihz;
+            volatile uint32_t whole_ticks;
+            volatile uint32_t remainder;
+            volatile uint32_t denominator;
+            volatile uint32_t ramping;
+        };
+
+        static continuous_rate_mailbox_t             _continuousRateMailbox;
+        static ContinuousEventScheduler::IntervalState _continuousInterval;
+        static volatile bool                         _continuousOwner;
+        static volatile bool                         _continuousSchedulerActive;
+        static volatile bool                         _continuousPlannerStartPending;
+        static volatile bool                         _continuousPulseDue;
+        static volatile bool                         _continuousFaulted;
+        static volatile bool                         _continuousFaultPending;
+        static volatile bool                         _continuousStoppedAck;
+        static volatile uint32_t                     _continuousAppliedRateMillihz;
+        static volatile uint32_t                     _continuousPulseCounter;
+        static uint32_t                              _continuousAppliedSequence;
+        static bool                                  _plannerSchedulerActive;
+        static uint32_t                              _plannerPeriodTicks;
+        static uint32_t                              _plannerTicksUntilEvent;
+        static uint32_t                              _schedulerLastIntervalTicks;
+        static bool                                  _continuousDeferredForPlanner;
+        static int32_t                               _continuousDeferredAdjustmentTicks;
+
+        static bool     continuousSchedulerPulse();
+        static void     publishContinuousRate(uint32_t rate_millihz, bool ramping);
+        static bool     readContinuousRateCommand(ContinuousEventScheduler::RateCommand& command, uint32_t& sequence);
+        static void     finishContinuousStop();
+        static uint32_t plannerPeakPulsesPerSecond(axis_t excluded_axis);
 
         static step_engine_t* step_engine;
 
@@ -96,14 +133,18 @@ namespace Machine {
 
         static uint32_t maxPulsesPerSec();
 
-        // Starts a low-rate continuous pulse stream on one configured I2S
-        // axis while the normal planner remains free to move other axes.
+        // Starts a continuous pulse lane on one configured I2S axis. The lane
+        // shares the proven planner callback and Stepping::step() output word;
+        // it does not use a second timer or an I2S-frame overlay.
         static bool startContinuous(axis_t axis, bool positive, uint32_t rate_millihz, uint32_t acceleration_millihz_per_sec);
-        static void setContinuousRate(uint32_t rate_millihz);
+        static bool setContinuousRate(uint32_t rate_millihz);
         static void stopContinuous(bool immediate, uint32_t deceleration_millihz_per_sec = 0);
         static void serviceContinuous();
         static bool continuousActive();
         static uint32_t continuousRateMillihz();
+        static uint32_t continuousTargetRateMillihz();
+        static uint32_t continuousPulseCount();
+        static bool continuousFaulted();
         static bool takeContinuousFault();
 
         static AxisMask direction_mask;

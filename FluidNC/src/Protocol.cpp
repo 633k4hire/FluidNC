@@ -932,8 +932,9 @@ static void protocol_do_cycle_start() {
 }
 
 void protocol_disable_steppers() {
-    if (Stepping::continuousActive()) {
-        // The shared C-stepper spindle still needs the common driver enable.
+    if (Stepping::continuousActive() || Stepper::is_awake()) {
+        // Continuous C and finite planner motion share the common driver
+        // enable. Never schedule idle disable while either lane is active.
         protocol_cancel_disable_steppers();
         Axes::set_disable(false, false);
         return;

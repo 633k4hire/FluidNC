@@ -5,6 +5,10 @@
 #include "Driver/i2s_out.h"
 #include "ContinuousStepperLogic.h"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 step_engine_t* step_engines = NULL;  // Linked list of stepping engines
 
 step_engine_t* find_engine(const char* name) {
@@ -59,7 +63,7 @@ namespace Machine {
         log_info("Stepping:" << stepTypes[_engine].name << " Pulse:" << _pulseUsecs << "us Dsbl Delay:" << _disableDelayUsecs
                              << "us Dir Delay:" << _directionDelayUsecs << "us Idle Delay:" << _idleMsecs << "ms");
 
-        uint32_t actual = step_engine->init(_directionDelayUsecs, _pulseUsecs, fStepperTimer, Stepper::pulse_func);
+        uint32_t actual = step_engine->init(_directionDelayUsecs, _pulseUsecs, fStepperTimer, continuousSchedulerPulse);
         if (actual != _pulseUsecs) {
             log_warn("stepping/pulse_us adjusted to " << actual);
         }
@@ -100,6 +104,26 @@ uint32_t        Stepping::_continuousCurrentRateMillihz = 0;
 uint32_t        Stepping::_continuousAccelerationMillihzPerSec = 0;
 uint32_t        Stepping::_continuousLastRampMs = 0;
 uint32_t        Stepping::_continuousRampRemainder = 0;
+uint32_t        Stepping::_continuousPublishedRateMillihz = 0;
+uint32_t        Stepping::_continuousPlannerPeakPulsesPerSec = 0;
+Stepping::continuous_rate_mailbox_t Stepping::_continuousRateMailbox = {};
+ContinuousEventScheduler::IntervalState Stepping::_continuousInterval = {};
+volatile bool     Stepping::_continuousOwner = false;
+volatile bool     Stepping::_continuousSchedulerActive = false;
+volatile bool     Stepping::_continuousPlannerStartPending = false;
+volatile bool     Stepping::_continuousPulseDue = false;
+volatile bool     Stepping::_continuousFaulted = false;
+volatile bool     Stepping::_continuousFaultPending = false;
+volatile bool     Stepping::_continuousStoppedAck = false;
+volatile uint32_t Stepping::_continuousAppliedRateMillihz = 0;
+volatile uint32_t Stepping::_continuousPulseCounter = 0;
+uint32_t          Stepping::_continuousAppliedSequence = 0;
+bool              Stepping::_plannerSchedulerActive = false;
+uint32_t          Stepping::_plannerPeriodTicks = 100;
+uint32_t          Stepping::_plannerTicksUntilEvent = 0;
+uint32_t          Stepping::_schedulerLastIntervalTicks = 100;
+bool              Stepping::_continuousDeferredForPlanner = false;
+int32_t           Stepping::_continuousDeferredAdjustmentTicks = 0;
 
 bool* Stepping::limit_var(axis_t axis, motor_t motor) {
     auto m = axis_motors[axis][motor];
@@ -134,6 +158,8 @@ void Stepping::unlimit(axis_t axis, motor_t motor) {
 }
 
 void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
+    const axis_t continuous_axis = _continuousAxis;
+    const bool continuous_owner = __atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE);
     // Set the direction pins, but optimize for the common
     // situation where the direction bits haven't changed.
     if (_previousDirectionMask == 65535) {
@@ -143,7 +169,7 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
 
     if (dir_mask != _previousDirectionMask) {
         for (axis_t axis = X_AXIS; axis < Axes::_numberAxis; axis++) {
-            if (axis == _continuousAxis) {
+            if (continuous_owner && axis == continuous_axis) {
                 continue;
             }
             bool dir     = bitnum_is_true(dir_mask, axis);
@@ -161,11 +187,11 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
         }
         // Preserve the continuously-owned C direction bit while accepting
         // planner direction changes for every other axis.
-        if (_continuousAxis < MAX_N_AXIS) {
-            const bool continuous_dir = bitnum_is_true(_previousDirectionMask, _continuousAxis);
+        if (continuous_owner && continuous_axis < MAX_N_AXIS) {
+            const bool continuous_dir = bitnum_is_true(_previousDirectionMask, continuous_axis);
             _previousDirectionMask = dir_mask;
-            if (continuous_dir) set_bitnum(_previousDirectionMask, _continuousAxis);
-            else clear_bitnum(_previousDirectionMask, _continuousAxis);
+            if (continuous_dir) set_bitnum(_previousDirectionMask, continuous_axis);
+            else clear_bitnum(_previousDirectionMask, continuous_axis);
         } else {
             _previousDirectionMask = dir_mask;
         }
@@ -176,7 +202,31 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
     // Turn on step pulses for motors that are supposed to step now
     for (axis_t axis = X_AXIS; axis < Axes::_numberAxis; axis++) {
         if (bitnum_is_true(step_mask, axis)) {
-            if (axis == _continuousAxis) {
+            if (continuous_owner && axis == continuous_axis) {
+                if (!__atomic_load_n(&_continuousPulseDue, __ATOMIC_ACQUIRE)) {
+                    __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+                    __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+                    __atomic_store_n(&_continuousFaultPending, true, __ATOMIC_RELEASE);
+                    continue;
+                }
+
+                bool emitted = false;
+                for (size_t motor = 0; motor < MAX_MOTORS_PER_AXIS; motor++) {
+                    auto m = axis_motors[axis][motor];
+                    if (m && !m->blocked && !m->limited) {
+                        step_engine->set_step_pin(m->step_pin, !m->step_invert);
+                        emitted = true;
+                    }
+                }
+                if (emitted) {
+                    const auto increment = bitnum_is_true(_previousDirectionMask, axis) ? -1 : 1;
+                    axis_steps[axis] += increment;
+                    __atomic_add_fetch(&_continuousPulseCounter, 1U, __ATOMIC_RELAXED);
+                } else {
+                    __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+                    __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+                    __atomic_store_n(&_continuousFaultPending, true, __ATOMIC_RELEASE);
+                }
                 continue;
             }
             auto increment = bitnum_is_true(dir_mask, axis) ? -1 : 1;
@@ -208,18 +258,34 @@ void IRAM_ATTR Stepping::unstep() {
     step_engine->finish_unstep();
 }
 
-void Stepping::reset() {}
+void Stepping::reset() {
+    if (__atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE)) {
+        stopContinuous(true);
+    }
+    __atomic_store_n(&_continuousPlannerStartPending, false, __ATOMIC_RELEASE);
+    _plannerSchedulerActive = false;
+    _plannerTicksUntilEvent = 0;
+    _continuousDeferredForPlanner = false;
+    _continuousDeferredAdjustmentTicks = 0;
+}
 void Stepping::beginLowLatency() {}
 void Stepping::endLowLatency() {}
 
 // Called only from Stepper::pulse_func when a new segment is loaded
 // The argument is in units of ticks of the timer that generates ISRs
 void IRAM_ATTR Stepping::setTimerPeriod(uint32_t ticks) {
-    step_engine->set_timer_ticks((uint32_t)ticks);
+    _plannerPeriodTicks = ticks ? ticks : 1;
+    if (!__atomic_load_n(&_continuousSchedulerActive, __ATOMIC_ACQUIRE)) {
+        step_engine->set_timer_ticks(_plannerPeriodTicks);
+    }
 }
 
 // Called only from Stepper::wake_up which is not used in ISR context
 void Stepping::startTimer() {
+    if (__atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&_continuousSchedulerActive, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&_continuousPlannerStartPending, true, __ATOMIC_RELEASE);
+    }
     step_engine->start_timer();
 }
 
@@ -241,120 +307,360 @@ uint32_t Stepping::maxPulsesPerSec() {
     return step_engine->max_pulses_per_sec();
 }
 
+void Stepping::publishContinuousRate(uint32_t rate_millihz, bool ramping) {
+    const auto command = ContinuousEventScheduler::make_rate_command(fStepperTimer, rate_millihz, ramping);
+    if (!command.valid) {
+        __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousFaultPending, true, __ATOMIC_RELEASE);
+        return;
+    }
+
+    uint32_t sequence = __atomic_load_n(&_continuousRateMailbox.sequence, __ATOMIC_RELAXED);
+    if (sequence & 1U) {
+        ++sequence;
+    }
+    __atomic_store_n(&_continuousRateMailbox.sequence, sequence + 1U, __ATOMIC_SEQ_CST);
+    _continuousRateMailbox.rate_millihz = command.rate_millihz;
+    _continuousRateMailbox.whole_ticks  = command.whole_ticks;
+    _continuousRateMailbox.remainder    = command.remainder;
+    _continuousRateMailbox.denominator  = command.denominator;
+    _continuousRateMailbox.ramping      = command.ramping ? 1U : 0U;
+    __atomic_store_n(&_continuousRateMailbox.sequence, sequence + 2U, __ATOMIC_SEQ_CST);
+    _continuousPublishedRateMillihz = rate_millihz;
+}
+
+bool IRAM_ATTR Stepping::readContinuousRateCommand(ContinuousEventScheduler::RateCommand& command, uint32_t& sequence) {
+    const uint32_t first = __atomic_load_n(&_continuousRateMailbox.sequence, __ATOMIC_ACQUIRE);
+    if (first & 1U) {
+        return false;
+    }
+
+    command.rate_millihz = _continuousRateMailbox.rate_millihz;
+    command.whole_ticks  = _continuousRateMailbox.whole_ticks;
+    command.remainder    = _continuousRateMailbox.remainder;
+    command.denominator  = _continuousRateMailbox.denominator;
+    command.ramping      = _continuousRateMailbox.ramping != 0;
+    command.valid        = true;
+    const uint32_t second = __atomic_load_n(&_continuousRateMailbox.sequence, __ATOMIC_ACQUIRE);
+    if (first != second || (second & 1U)) {
+        return false;
+    }
+    sequence = second;
+    return true;
+}
+
+bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
+    if (!__atomic_load_n(&_continuousSchedulerActive, __ATOMIC_ACQUIRE)) {
+        return Stepper::pulse_func();
+    }
+
+    const uint32_t elapsed_ticks = _schedulerLastIntervalTicks ? _schedulerLastIntervalTicks : 1U;
+    bool owner = __atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE);
+    if (owner && i2s_out_continuous_transport_faulted()) {
+        __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousFaultPending, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousAppliedRateMillihz, 0U, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousStoppedAck, true, __ATOMIC_RELEASE);
+        ContinuousEventScheduler::reset(_continuousInterval, false);
+        owner = false;
+    }
+
+    ContinuousEventScheduler::RateCommand command;
+    uint32_t command_sequence = 0;
+    if (readContinuousRateCommand(command, command_sequence) && command_sequence != _continuousAppliedSequence) {
+        if (!ContinuousEventScheduler::apply_rate(_continuousInterval, command)) {
+            __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+            __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+            __atomic_store_n(&_continuousFaultPending, true, __ATOMIC_RELEASE);
+            owner = false;
+        } else {
+            _continuousAppliedSequence = command_sequence;
+            __atomic_store_n(&_continuousAppliedRateMillihz, command.rate_millihz, __ATOMIC_RELEASE);
+            if (command.rate_millihz == 0) {
+                __atomic_store_n(&_continuousStoppedAck, true, __ATOMIC_RELEASE);
+            }
+        }
+    }
+
+    if (__atomic_exchange_n(&_continuousPlannerStartPending, false, __ATOMIC_ACQ_REL)) {
+        _plannerSchedulerActive = true;
+        _plannerTicksUntilEvent = 0;
+    } else if (_plannerSchedulerActive && !Stepper::is_awake()) {
+        _plannerSchedulerActive = false;
+        _plannerTicksUntilEvent = 0;
+        _continuousDeferredForPlanner = false;
+        _continuousDeferredAdjustmentTicks = 0;
+    }
+
+    if (_plannerSchedulerActive && _plannerTicksUntilEvent != 0) {
+        ContinuousEventScheduler::elapse(_plannerTicksUntilEvent, elapsed_ticks);
+    }
+    if (owner && _continuousInterval.active && !_continuousDeferredForPlanner &&
+        _continuousInterval.ticks_until_step != 0) {
+        ContinuousEventScheduler::elapse(_continuousInterval.ticks_until_step, elapsed_ticks);
+    }
+
+    bool planner_due = _plannerSchedulerActive && _plannerTicksUntilEvent == 0;
+    bool continuous_due = owner && _continuousInterval.active &&
+                          !_continuousDeferredForPlanner && _continuousInterval.ticks_until_step == 0;
+    int32_t phase_adjustment = 0;
+    const uint32_t merge_guard_ticks = std::max<uint32_t>(1U, _pulseUsecs * ticksPerMicrosecond);
+
+    if (continuous_due && !planner_due && _plannerSchedulerActive &&
+        _plannerTicksUntilEvent < merge_guard_ticks) {
+        _continuousDeferredForPlanner = true;
+        _continuousDeferredAdjustmentTicks = -static_cast<int32_t>(_plannerTicksUntilEvent);
+        continuous_due = false;
+    } else if (planner_due && !continuous_due && owner && _continuousInterval.active &&
+               _continuousInterval.ticks_until_step < merge_guard_ticks) {
+        phase_adjustment = static_cast<int32_t>(_continuousInterval.ticks_until_step);
+        _continuousInterval.ticks_until_step = 0;
+        continuous_due = true;
+    } else if (planner_due && _continuousDeferredForPlanner) {
+        continuous_due = owner && _continuousInterval.active;
+        phase_adjustment = _continuousDeferredAdjustmentTicks;
+        _continuousDeferredForPlanner = false;
+        _continuousDeferredAdjustmentTicks = 0;
+    }
+
+    if (planner_due) {
+        __atomic_store_n(&_continuousPulseDue, continuous_due, __ATOMIC_RELEASE);
+        const bool planner_continues = Stepper::pulse_func();
+        __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
+        if (continuous_due) {
+            ContinuousEventScheduler::retire_step(_continuousInterval, phase_adjustment);
+        }
+        _plannerSchedulerActive = planner_continues;
+        _plannerTicksUntilEvent = planner_continues ? _plannerPeriodTicks : 0;
+    } else if (continuous_due) {
+        AxisMask continuous_mask = 0;
+        set_bitnum(continuous_mask, _continuousAxis);
+        __atomic_store_n(&_continuousPulseDue, true, __ATOMIC_RELEASE);
+        step(continuous_mask, _previousDirectionMask == 65535 ? direction_mask : _previousDirectionMask);
+        unstep();
+        __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
+        ContinuousEventScheduler::retire_step(_continuousInterval, phase_adjustment);
+    }
+
+    owner = __atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE);
+    uint32_t next_ticks = std::numeric_limits<uint32_t>::max();
+    if (_plannerSchedulerActive) {
+        next_ticks = std::max<uint32_t>(1U, _plannerTicksUntilEvent);
+    }
+    if (owner && _continuousInterval.active && !_continuousDeferredForPlanner) {
+        next_ticks = std::min(next_ticks, std::max<uint32_t>(1U, _continuousInterval.ticks_until_step));
+    }
+    if (owner && (!_continuousInterval.active || _continuousInterval.command.ramping)) {
+        constexpr uint32_t service_ticks = 20000U;
+        next_ticks = std::min(next_ticks, service_ticks);
+    }
+
+    if (next_ticks == std::numeric_limits<uint32_t>::max()) {
+        __atomic_store_n(&_continuousSchedulerActive, false, __ATOMIC_RELEASE);
+        _schedulerLastIntervalTicks = _plannerPeriodTicks ? _plannerPeriodTicks : 100U;
+        step_engine->set_timer_ticks(_schedulerLastIntervalTicks);
+        return false;
+    }
+
+    _schedulerLastIntervalTicks = next_ticks;
+    step_engine->set_timer_ticks(next_ticks);
+    return owner || _plannerSchedulerActive;
+}
+
+uint32_t Stepping::plannerPeakPulsesPerSecond(axis_t excluded_axis) {
+    uint32_t peak = 0;
+    if (config == nullptr || config->_axes == nullptr) {
+        return maxPulsesPerSec();
+    }
+    for (axis_t axis = X_AXIS; axis < Axes::_numberAxis; ++axis) {
+        if (axis == excluded_axis) {
+            continue;
+        }
+        auto configured_axis = config->_axes->_axis[axis];
+        if (configured_axis != nullptr) {
+            peak = std::max(peak, static_cast<uint32_t>(std::ceil(
+                                      configured_axis->_stepsPerMm * configured_axis->_maxRate / 60.0f)));
+        }
+    }
+    return peak;
+}
+
 bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz, uint32_t acceleration_millihz_per_sec) {
-    if (step_engine == nullptr || strncmp(step_engine->name, "I2S", 3) != 0 || axis >= Axes::_numberAxis || rate_millihz == 0) {
+    if (step_engine == nullptr || strncmp(step_engine->name, "I2S", 3) != 0 || axis >= Axes::_numberAxis ||
+        rate_millihz == 0 || Stepper::is_awake() || continuousActive()) {
         return false;
     }
     auto motor = axis_motors[axis][0];
-    if (motor == nullptr || axis_motors[axis][1] != nullptr) {
+    if (motor == nullptr || axis_motors[axis][1] != nullptr || motor->blocked || motor->limited) {
+        return false;
+    }
+
+    _continuousPlannerPeakPulsesPerSec = plannerPeakPulsesPerSecond(axis);
+    if (!ContinuousEventScheduler::combined_rate_admissible(
+            rate_millihz, _continuousPlannerPeakPulsesPerSec, maxPulsesPerSec())) {
+        return false;
+    }
+    const auto target_command = ContinuousEventScheduler::make_rate_command(fStepperTimer, rate_millihz, true);
+    if (!target_command.valid) {
         return false;
     }
 
     // In the planner convention a clear direction bit increases position.
     const bool dir_bit   = !positive;
     const bool dir_level = dir_bit ^ motor->dir_invert;
-    _continuousAxis      = axis;
-    _continuousTargetRateMillihz       = rate_millihz;
-    _continuousCurrentRateMillihz      = 0;
-    _continuousAccelerationMillihzPerSec = acceleration_millihz_per_sec ? acceleration_millihz_per_sec : rate_millihz;
-    _continuousLastRampMs              = millis();
-    _continuousRampRemainder           = 0;
-    if (!i2s_out_aux_step_start(motor->step_pin,
-                                motor->step_invert,
-                                motor->dir_pin,
-                                dir_level,
-                                0)) {
-        _continuousAxis = INVALID_AXIS;
-        _continuousTargetRateMillihz = 0;
-        _continuousAccelerationMillihzPerSec = 0;
+    i2s_out_write(motor->step_pin, motor->step_invert ? 1 : 0);
+    step_engine->set_dir_pin(motor->dir_pin, dir_level);
+    step_engine->finish_dir();
+    i2s_out_delay();
+    if (!i2s_out_continuous_transport_start()) {
         return false;
     }
+
+    _continuousAxis = axis;
+    _continuousTargetRateMillihz = rate_millihz;
+    _continuousCurrentRateMillihz = 0;
+    _continuousPublishedRateMillihz = 0;
+    _continuousAccelerationMillihzPerSec = acceleration_millihz_per_sec ? acceleration_millihz_per_sec : rate_millihz;
+    _continuousLastRampMs = millis();
+    _continuousRampRemainder = 0;
+    _continuousAppliedSequence = 0;
+    ContinuousEventScheduler::reset(_continuousInterval);
+    __atomic_store_n(&_continuousAppliedRateMillihz, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPulseCounter, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaulted, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultPending, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousStoppedAck, false, __ATOMIC_RELEASE);
+    publishContinuousRate(0, true);
+
     if (_previousDirectionMask == 65535) {
         _previousDirectionMask = direction_mask;
     }
     if (dir_bit) set_bitnum(_previousDirectionMask, axis);
     else clear_bitnum(_previousDirectionMask, axis);
+
+    _plannerSchedulerActive = false;
+    _plannerTicksUntilEvent = 0;
+    _continuousDeferredForPlanner = false;
+    _continuousDeferredAdjustmentTicks = 0;
+    constexpr uint32_t service_ticks = 20000U;  // 1 ms at the fixed 20 MHz step timer.
+    _schedulerLastIntervalTicks = service_ticks;
+    __atomic_store_n(&_continuousOwner, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousSchedulerActive, true, __ATOMIC_RELEASE);
+    step_engine->start_timer();
     return true;
 }
 
-void Stepping::setContinuousRate(uint32_t rate_millihz) {
+bool Stepping::setContinuousRate(uint32_t rate_millihz) {
+    if (!continuousActive() || rate_millihz == 0 ||
+        !ContinuousEventScheduler::combined_rate_admissible(
+            rate_millihz, _continuousPlannerPeakPulsesPerSec, maxPulsesPerSec()) ||
+        !ContinuousEventScheduler::make_rate_command(fStepperTimer, rate_millihz).valid) {
+        return false;
+    }
     _continuousTargetRateMillihz = rate_millihz;
+    return true;
+}
+
+void Stepping::finishContinuousStop() {
+    // The scheduler has retired the last high pulse. Drain the shallow FIFO so
+    // the corresponding low/static word is physical before releasing C.
+    i2s_out_delay();
+    i2s_out_continuous_transport_stop();
+    __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+    _continuousCurrentRateMillihz = 0;
+    _continuousPublishedRateMillihz = 0;
+    _continuousAccelerationMillihzPerSec = 0;
+    _continuousRampRemainder = 0;
+    _continuousAxis = INVALID_AXIS;
+    __atomic_store_n(&_continuousStoppedAck, false, __ATOMIC_RELEASE);
 }
 
 void Stepping::stopContinuous(bool immediate, uint32_t deceleration_millihz_per_sec) {
     _continuousTargetRateMillihz = 0;
     if (immediate) {
-        i2s_out_aux_step_set_rate(0);
-        i2s_out_aux_step_stop(true);
+        __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+        i2s_out_continuous_transport_stop();
+        publishContinuousRate(0, false);
         _continuousCurrentRateMillihz = 0;
+        _continuousPublishedRateMillihz = 0;
         _continuousAccelerationMillihzPerSec = 0;
         _continuousRampRemainder = 0;
         _continuousAxis = INVALID_AXIS;
+        __atomic_store_n(&_continuousAppliedRateMillihz, 0U, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousStoppedAck, true, __ATOMIC_RELEASE);
         return;
     }
     if (deceleration_millihz_per_sec != 0) {
         _continuousAccelerationMillihzPerSec = deceleration_millihz_per_sec;
-        _continuousRampRemainder             = 0;
+        _continuousRampRemainder = 0;
     }
     serviceContinuous();
 }
 
 void Stepping::serviceContinuous() {
-    if (_continuousAxis >= MAX_N_AXIS) {
+    if (_continuousAxis >= MAX_N_AXIS || !__atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    if (i2s_out_continuous_transport_faulted()) {
+        __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&_continuousFaultPending, true, __ATOMIC_RELEASE);
         return;
     }
 
-    if (!i2s_out_aux_step_active()) {
-        _continuousTargetRateMillihz = 0;
-        _continuousCurrentRateMillihz = 0;
-        _continuousAccelerationMillihzPerSec = 0;
-        _continuousRampRemainder = 0;
-        _continuousAxis = INVALID_AXIS;
-        return;
-    }
-
-    const uint32_t now        = millis();
+    const uint32_t now = millis();
     const uint32_t elapsed_ms = now - _continuousLastRampMs;
-    if (elapsed_ms == 0) {
-        return;
-    }
-    _continuousLastRampMs = now;
-
-    const uint32_t next_rate = ContinuousStepperLogic::ramp_rate(
-        _continuousCurrentRateMillihz,
-        _continuousTargetRateMillihz,
-        _continuousAccelerationMillihzPerSec,
-        elapsed_ms,
-        _continuousRampRemainder);
-    if (next_rate != _continuousCurrentRateMillihz) {
+    if (elapsed_ms != 0) {
+        _continuousLastRampMs = now;
+        const uint32_t next_rate = ContinuousStepperLogic::ramp_rate(
+            _continuousCurrentRateMillihz,
+            _continuousTargetRateMillihz,
+            _continuousAccelerationMillihzPerSec,
+            elapsed_ms,
+            _continuousRampRemainder);
         _continuousCurrentRateMillihz = next_rate;
-        i2s_out_aux_step_set_rate(next_rate);
+        const bool ramping = next_rate != _continuousTargetRateMillihz;
+        if (next_rate != _continuousPublishedRateMillihz ||
+            (next_rate == 0 && !__atomic_load_n(&_continuousStoppedAck, __ATOMIC_ACQUIRE))) {
+            if (next_rate == 0) {
+                __atomic_store_n(&_continuousStoppedAck, false, __ATOMIC_RELEASE);
+            }
+            publishContinuousRate(next_rate, ramping);
+        }
     }
 
-    if (_continuousTargetRateMillihz == 0 && _continuousCurrentRateMillihz == 0) {
-        i2s_out_aux_step_stop(true);
-        _continuousAccelerationMillihzPerSec = 0;
-        _continuousRampRemainder = 0;
-        _continuousAxis = INVALID_AXIS;
+    if (_continuousTargetRateMillihz == 0 && _continuousCurrentRateMillihz == 0 &&
+        __atomic_load_n(&_continuousStoppedAck, __ATOMIC_ACQUIRE)) {
+        finishContinuousStop();
     }
 }
 
 bool Stepping::continuousActive() {
-    const bool active = i2s_out_aux_step_active();
-    if (!active) {
-        _continuousTargetRateMillihz = 0;
-        _continuousCurrentRateMillihz = 0;
-        _continuousAccelerationMillihzPerSec = 0;
-        _continuousRampRemainder = 0;
-        _continuousAxis = INVALID_AXIS;
-    }
-    return active;
+    return __atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE);
 }
 
 uint32_t Stepping::continuousRateMillihz() {
-    return _continuousCurrentRateMillihz;
+    return __atomic_load_n(&_continuousAppliedRateMillihz, __ATOMIC_ACQUIRE);
+}
+
+uint32_t Stepping::continuousTargetRateMillihz() {
+    return _continuousTargetRateMillihz;
+}
+
+uint32_t Stepping::continuousPulseCount() {
+    return __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
+}
+
+bool Stepping::continuousFaulted() {
+    return __atomic_load_n(&_continuousFaulted, __ATOMIC_ACQUIRE) || i2s_out_continuous_transport_faulted();
 }
 
 bool Stepping::takeContinuousFault() {
-    return i2s_out_aux_step_take_fault();
+    const bool scheduler_fault = __atomic_exchange_n(&_continuousFaultPending, false, __ATOMIC_ACQ_REL);
+    const bool transport_fault = i2s_out_continuous_transport_take_fault();
+    if (transport_fault) {
+        __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
+    }
+    return scheduler_fault || transport_fault;
 }

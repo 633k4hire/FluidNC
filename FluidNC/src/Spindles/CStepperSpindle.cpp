@@ -117,20 +117,24 @@ namespace Spindles {
 
         protocol_cancel_disable_steppers();
         Machine::Axes::set_disable(false, false);
-        _cReferenceValid = false;
         if (Machine::Stepping::continuousActive()) {
-            Machine::Stepping::setContinuousRate(rateMillihz);
+            if (!Machine::Stepping::setContinuousRate(rateMillihz)) {
+                log_error(name() << " rejected the C-axis rate: combined planner/I2S capacity exceeded");
+                _lastControlActionFailed = true;
+                return;
+            }
         } else {
             const bool positive = _cwPositive ? state == SpindleState::Cw : state == SpindleState::Ccw;
             if (!Machine::Stepping::startContinuous(
                     static_cast<axis_t>(_axis), positive, rateMillihz, _accelerationMillihzPerSec)) {
-                log_error(name() << " could not start the C-axis I2S pulse stream");
+                log_error(name() << " could not start the planner-integrated C scheduler; planner must be idle and capacity available");
                 _lastControlActionFailed = true;
                 protocol_disable_steppers();
                 return;
             }
         }
 
+        _cReferenceValid = false;
         _current_state = state;
         _current_speed = static_cast<SpindleSpeed>(std::lround(rpm));
         _commandedRpm  = rpm;
@@ -205,7 +209,7 @@ namespace Spindles {
             send_alarm(ExecAlarm::SpindleControl);
         } else if (stopFaulted) {
             _lastControlActionFailed = true;
-            log_error(name() << " stopped during deceleration: I2S FIFO underrun");
+            log_error(name() << " stopped during deceleration: C scheduler or I2S transport fault");
             send_alarm(ExecAlarm::SpindleControl);
         }
     }
@@ -230,7 +234,7 @@ namespace Spindles {
 
     void CStepper::service() {
         if (Machine::Stepping::takeContinuousFault()) {
-            log_error(name() << " stopped: I2S FIFO underrun");
+            log_error(name() << " stopped: C scheduler or I2S transport fault");
             _lastControlActionFailed = true;
             stopStream(true);
             send_alarm(ExecAlarm::SpindleControl);

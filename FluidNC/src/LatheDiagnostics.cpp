@@ -187,8 +187,14 @@ namespace LatheDiagnostics {
             ",\"planner_scheduled_ticks\":" + std::to_string(i2s.planner_scheduled_ticks) +
             ",\"planner_emitted_frames\":" + std::to_string(i2s.planner_emitted_frames) +
             ",\"planner_emitted_intervals\":" + std::to_string(i2s.planner_emitted_intervals) +
+            ",\"transport_faulted\":" + (i2s.transport_faulted ? "true" : "false") +
             "},\"c_planner\":{\"steps\":" + std::to_string(Machine::Stepping::getSteps(cAxis)) +
             ",\"position_degrees\":" + std::to_string(get_mpos()[cAxis]) +
+            ",\"continuous_active\":" + (Machine::Stepping::continuousActive() ? "true" : "false") +
+            ",\"continuous_target_millihz\":" + std::to_string(Machine::Stepping::continuousTargetRateMillihz()) +
+            ",\"continuous_scheduled_millihz\":" + std::to_string(Machine::Stepping::continuousRateMillihz()) +
+            ",\"continuous_pulses\":" + std::to_string(Machine::Stepping::continuousPulseCount()) +
+            ",\"continuous_faulted\":" + (Machine::Stepping::continuousFaulted() ? "true" : "false") +
             "},\"input\":{\"line_count\":" + std::to_string(lineCount) +
             ",\"jog_count\":" + std::to_string(jogCount) +
             ",\"home_count\":" + std::to_string(homeCount) +

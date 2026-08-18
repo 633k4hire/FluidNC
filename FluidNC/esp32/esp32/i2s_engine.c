@@ -12,7 +12,6 @@
 
 #include "Driver/step_engine.h"
 #include "Driver/i2s_out.h"
-#include "Driver/i2s_frame_compositor.h"
 #include "Driver/i2s_fractional_timing.h"
 #include "Driver/StepTimer.h"
 #include "hal/i2s_hal.h"
@@ -32,7 +31,6 @@
 #include "Driver/fluidnc_gpio.h"
 
 #include "esp_intr_alloc.h"
-#include "esp_timer.h"
 #include <xtensa/core-macros.h>
 
 uint32_t i2s_frame_us;  // 1, 2 or 4
@@ -327,19 +325,11 @@ static volatile uint32_t _pending_direction_counts = 0;
 static uint32_t _pulse_data;
 static i2s_fractional_timing_t _planner_frame_timing;
 
-// A low-rate auxiliary pulse stream can be merged into every I2S sample.
-// The normal planner still owns _pulse_data; this overlay only changes its
-// configured step bit and therefore cannot race a second peripheral/timer.
-static volatile bool     _aux_running                = false;
-static volatile uint32_t _aux_current_rate_millihz  = 0;
-static volatile uint32_t _aux_phase_increment        = 0;
-static volatile uint32_t _aux_generated_pulses       = 0;
-static uint32_t          _aux_phase                  = 0;
-static uint32_t          _aux_step_bit               = 0;
-static bool              _aux_step_active_high       = true;
-static uint32_t          _aux_pulse_frames_remaining = 0;
-static volatile bool     _aux_fault_pending          = false;
-static volatile bool     _aux_faulted                = false;
+// Continuous C uses the same planner callback and pulse word as X/Z.  The I2S
+// layer only watches for transport underruns while that shared scheduler owns C.
+static volatile bool _continuous_transport_active        = false;
+static volatile bool _continuous_transport_fault_pending = false;
+static volatile bool _continuous_transport_faulted       = false;
 
 static volatile uint32_t _diag_underruns                 = 0;
 static volatile uint32_t _diag_max_isr_gap_cycles        = 0;
@@ -360,15 +350,6 @@ typedef struct {
 } i2s_planner_diagnostics_state_t;
 
 static i2s_planner_diagnostics_state_t _diag_planner = { 0 };
-static int64_t                         _aux_started_us = 0;
-static int64_t                         _aux_stopped_us = 0;
-
-// Called only from foreground/task context.  No division is permitted in the
-// high-frequency I2S ISR that consumes this precomputed DDS increment.
-static uint32_t aux_phase_increment_for_rate(uint32_t rate_millihz) {
-    const uint32_t frame_hz = 1000000U / i2s_frame_us;
-    return (uint32_t)(((uint64_t)rate_millihz << 32) / ((uint64_t)frame_hz * 1000ULL));
-}
 
 static void IRAM_ATTR set_timer_ticks(uint32_t ticks) {
     if (ticks) {
@@ -428,20 +409,15 @@ static void IRAM_ATTR i2s_isr() {
         }
     }
 
-    bool aux_active = _aux_running;
     if (I2S0.int_raw.tx_rempty) {
         I2S0.int_clr.tx_rempty = 1;
         ++_diag_underruns;
-        if (aux_active) {
-            // Stop generating C pulses immediately. Foreground service turns
-            // this latch into a spindle-control alarm; never grind silently.
-            _aux_running                = false;
-            _aux_current_rate_millihz  = 0;
-            _aux_phase_increment        = 0;
-            _aux_pulse_frames_remaining = 0;
-            _aux_faulted                = true;
-            _aux_fault_pending          = true;
-            aux_active                  = false;
+        if (_continuous_transport_active) {
+            // The shared scheduler must fail closed. Foreground service turns
+            // this latch into a spindle-control alarm; stale timing is unsafe.
+            _continuous_transport_active        = false;
+            _continuous_transport_faulted       = true;
+            _continuous_transport_fault_pending = true;
         }
     }
 
@@ -452,78 +428,34 @@ static void IRAM_ATTR i2s_isr() {
     uint32_t remaining_direction_counts = _remaining_direction_counts;
 
     int i = _fifo_reload;
-    if (!aux_active) {
-        // Planner-only mode has no per-frame auxiliary work.
-        do {
-            if (remaining_direction_counts) {
-                I2S0.fifo_wr = i2s_out_port_data;
-                --i;
-                --remaining_direction_counts;
-            } else if (remaining_pulse_counts) {
-                I2S0.fifo_wr = pulse_data;
-                --i;
-                --remaining_pulse_counts;
-            } else if (remaining_delay_counts) {
-                I2S0.fifo_wr = i2s_out_port_data;
-                --i;
-                --remaining_delay_counts;
-            } else {
-                _pulse_data = i2s_out_port_data;
-                const bool callback_active = _pulse_func();
-                pulse_data             = _pulse_data;
-                remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
-                const uint32_t interval_frames = next_planner_interval_frames(callback_active);
-                remaining_delay_counts = interval_frames > remaining_pulse_counts
-                                             ? interval_frames - remaining_pulse_counts
-                                             : 0;
-                if (_pending_direction_counts) {
-                    remaining_direction_counts = _pending_direction_counts;
-                    _pending_direction_counts  = 0;
-                }
+    do {
+        if (remaining_direction_counts) {
+            I2S0.fifo_wr = i2s_out_port_data;
+            --i;
+            --remaining_direction_counts;
+        } else if (remaining_pulse_counts) {
+            I2S0.fifo_wr = pulse_data;
+            --i;
+            --remaining_pulse_counts;
+        } else if (remaining_delay_counts) {
+            I2S0.fifo_wr = i2s_out_port_data;
+            --i;
+            --remaining_delay_counts;
+        } else {
+            _pulse_data = i2s_out_port_data;
+            const bool callback_active = _pulse_func();
+            pulse_data             = _pulse_data;
+            remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
+            const uint32_t interval_frames = next_planner_interval_frames(callback_active);
+            remaining_delay_counts = interval_frames > remaining_pulse_counts
+                                         ? interval_frames - remaining_pulse_counts
+                                         : 0;
+            if (_pending_direction_counts) {
+                remaining_direction_counts = _pending_direction_counts;
+                _pending_direction_counts  = 0;
             }
-        } while (i);
-    } else {
-        i2s_aux_frame_state_t aux = {
-            .phase                  = _aux_phase,
-            .increment              = _aux_phase_increment,
-            .pulse_frames_remaining = _aux_pulse_frames_remaining,
-            .pulse_frames           = _pulse_counts,
-            .step_bit               = _aux_step_bit,
-            .generated_pulses       = _aux_generated_pulses,
-            .step_active_high       = _aux_step_active_high,
-        };
-        do {
-            if (remaining_direction_counts) {
-                I2S0.fifo_wr = i2s_aux_compose_frame(i2s_out_port_data, &aux);
-                --i;
-                --remaining_direction_counts;
-            } else if (remaining_pulse_counts) {
-                I2S0.fifo_wr = i2s_aux_compose_frame(pulse_data, &aux);
-                --i;
-                --remaining_pulse_counts;
-            } else if (remaining_delay_counts) {
-                I2S0.fifo_wr = i2s_aux_compose_frame(i2s_out_port_data, &aux);
-                --i;
-                --remaining_delay_counts;
-            } else {
-                _pulse_data = i2s_out_port_data;
-                const bool callback_active = _pulse_func();
-                pulse_data             = _pulse_data;
-                remaining_pulse_counts = pulse_data == i2s_out_port_data ? 0 : _pulse_counts;
-                const uint32_t interval_frames = next_planner_interval_frames(callback_active);
-                remaining_delay_counts = interval_frames > remaining_pulse_counts
-                                             ? interval_frames - remaining_pulse_counts
-                                             : 0;
-                if (_pending_direction_counts) {
-                    remaining_direction_counts = _pending_direction_counts;
-                    _pending_direction_counts  = 0;
-                }
-            }
-        } while (i);
-        _aux_phase                  = aux.phase;
-        _aux_pulse_frames_remaining = aux.pulse_frames_remaining;
-        _aux_generated_pulses       = aux.generated_pulses;
-    }
+        }
+    } while (i);
 
     // Save the counts back to the variables
     _remaining_pulse_counts = remaining_pulse_counts;
@@ -644,90 +576,42 @@ step_engine_t i2s_engine = {
 // clang-format on
 REGISTER_STEP_ENGINE(I2S, &i2s_engine);
 
-bool i2s_out_aux_step_start(pinnum_t step_pin,
-                            bool step_invert,
-                            pinnum_t dir_pin,
-                            bool dir_level,
-                            uint32_t initial_rate_millihz) {
-    if (!i2s_out_initialized || step_pin >= I2S_OUT_NUM_BITS || dir_pin >= I2S_OUT_NUM_BITS) {
+bool i2s_out_continuous_transport_start() {
+    if (!i2s_out_initialized || _continuous_transport_active) {
         return false;
     }
-
-    i2s_out_write(step_pin, step_invert ? 1 : 0);
-    i2s_out_write(dir_pin, dir_level ? 1 : 0);
-    i2s_out_delay();
-
-    _aux_step_bit                 = 1U << step_pin;
-    _aux_step_active_high         = !step_invert;
-    _aux_current_rate_millihz     = initial_rate_millihz;
-    _aux_phase                    = 0;
-    _aux_phase_increment          = aux_phase_increment_for_rate(initial_rate_millihz);
-    _aux_generated_pulses         = 0;
-    _aux_pulse_frames_remaining   = 0;
-    _aux_fault_pending            = false;
-    _aux_faulted                  = false;
-    _diag_underruns               = 0;
-    _diag_max_isr_gap_cycles      = 0;
-    _diag_max_isr_duration_cycles = 0;
-    _diag_last_isr_cycle          = 0;
-    _aux_started_us               = esp_timer_get_time();
-    _aux_stopped_us               = 0;
-    I2S0.int_clr.tx_rempty        = 1;
-    _aux_running = true;
+    _continuous_transport_fault_pending = false;
+    _continuous_transport_faulted       = false;
+    _diag_underruns                     = 0;
+    _diag_max_isr_gap_cycles            = 0;
+    _diag_max_isr_duration_cycles       = 0;
+    _diag_last_isr_cycle                = 0;
+    I2S0.int_clr.tx_rempty              = 1;
+    _continuous_transport_active        = true;
     return true;
 }
 
-void i2s_out_aux_step_set_rate(uint32_t target_rate_millihz) {
-    if (_aux_running) {
-        const uint32_t increment = aux_phase_increment_for_rate(target_rate_millihz);
-        _aux_current_rate_millihz = target_rate_millihz;
-        _aux_phase_increment       = increment;
-    }
+void i2s_out_continuous_transport_stop() {
+    _continuous_transport_active = false;
 }
 
-void i2s_out_aux_step_stop(bool immediate) {
-    (void)immediate;
-    _aux_current_rate_millihz = 0;
-    _aux_phase_increment      = 0;
-    _aux_pulse_frames_remaining = 0;
-    _aux_phase                  = 0;
-    _aux_running                = false;
-    // Frames already composed before the ownership change must physically
-    // drain before foreground code establishes the stopped location as C0.
-    i2s_out_delay();
-    _aux_stopped_us             = esp_timer_get_time();
+bool IRAM_ATTR i2s_out_continuous_transport_active() {
+    return _continuous_transport_active;
 }
 
-bool i2s_out_aux_step_active() {
-    return _aux_running;
+bool IRAM_ATTR i2s_out_continuous_transport_faulted() {
+    return _continuous_transport_faulted;
 }
 
-uint32_t i2s_out_aux_step_current_rate_millihz() {
-    return _aux_current_rate_millihz;
-}
-
-uint32_t i2s_out_aux_step_pulse_count() {
-    return _aux_generated_pulses;
-}
-
-bool i2s_out_aux_step_take_fault() {
-    const bool pending = _aux_fault_pending;
-    _aux_fault_pending = false;
+bool i2s_out_continuous_transport_take_fault() {
+    const bool pending = _continuous_transport_fault_pending;
+    _continuous_transport_fault_pending = false;
     return pending;
 }
 
 void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
     if (diagnostics == NULL) {
         return;
-    }
-    const uint32_t emitted = _aux_generated_pulses;
-    uint32_t emitted_rate  = 0;
-    if (_aux_started_us != 0) {
-        const int64_t ended_us   = _aux_stopped_us ? _aux_stopped_us : esp_timer_get_time();
-        const int64_t elapsed_us = ended_us - _aux_started_us;
-        if (elapsed_us > 0) {
-            emitted_rate = (uint32_t)(((uint64_t)emitted * 1000000000ULL) / (uint64_t)elapsed_us);
-        }
     }
     diagnostics->fifo_threshold          = _fifo_threshold;
     diagnostics->fifo_reload             = _fifo_reload;
@@ -740,9 +624,6 @@ void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
     diagnostics->planner_scheduled_ticks          = _diag_planner.scheduled_ticks;
     diagnostics->planner_emitted_frames           = _diag_planner.emitted_frames;
     diagnostics->planner_emitted_intervals        = _diag_planner.emitted_intervals;
-    diagnostics->requested_rate_millihz           = _aux_current_rate_millihz;
-    diagnostics->emitted_rate_millihz             = emitted_rate;
-    diagnostics->emitted_pulses                   = emitted;
     diagnostics->planner_active                   = _diag_planner.active;
-    diagnostics->aux_faulted                      = _aux_faulted;
+    diagnostics->transport_faulted                = _continuous_transport_faulted;
 }
