@@ -79,10 +79,10 @@ axes:
         step_pin: i2so.3
         direction_pin: i2so.4
 
-  # Direct-drive NEMA23 commanded spindle axis: 200 steps * 8 microsteps / 360 degrees.
+  # Direct-drive NEMA23 commanded spindle axis: 200 steps * 16 microsteps / 360 degrees.
   # This is not spindle phase feedback; the lathe encoder below must be a real spindle encoder.
   c:
-    steps_per_mm: 4.444444
+    steps_per_mm: 8.888889
     max_rate_mm_per_min: 243000
     acceleration_mm_per_sec2: 9000
     max_travel_mm: 100000
@@ -164,7 +164,7 @@ maijker_5_station_turret:
 
 CStepper:
   # The direct-drive NEMA23 on the C/Y step and direction outputs is both the
-  # indexed C axis and the open-loop spindle. The 1600 pulses/rev scale comes
+  # indexed C axis and the open-loop spindle. The 3200 pulses/rev scale comes
   # from axes.c; continuous spindle speed is configured independently.
   axis: 5
   cw_positive: true
