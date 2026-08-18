@@ -191,8 +191,8 @@ TEST(LatheScaffold, SharedChuckPolicyIsInertWhenFeatureIsDisabled) {
     EXPECT_EQ(decision.next_mode, Lathe::SharedChuckMode::Unavailable);
 }
 
-TEST(LatheScaffold, CStepperScaleMatchesSixteenMicrostepDirectDrive) {
-    EXPECT_EQ(Spindles::CStepperLogic::steps_per_revolution(8.888889f), 3200u);
+TEST(LatheScaffold, CStepperScaleMatchesEightMicrostepDirectDrive) {
+    EXPECT_EQ(Spindles::CStepperLogic::steps_per_revolution(4.444444f), 1600u);
 }
 
 TEST(LatheScaffold, CStepperRpmLimitsAreInclusiveAndRejectOutOfRangeCommands) {
@@ -203,11 +203,11 @@ TEST(LatheScaffold, CStepperRpmLimitsAreInclusiveAndRejectOutOfRangeCommands) {
 }
 
 TEST(LatheScaffold, CStepperRpmProducesExpectedPulseRates) {
-    constexpr uint32_t stepsPerRev = 3200;
-    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(0.5f, stepsPerRev), 26667u);
-    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(1.0f, stepsPerRev), 53333u);
-    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(5.0f, stepsPerRev), 266667u);
-    EXPECT_EQ(Spindles::CStepperLogic::acceleration_millihz_per_sec(100.0f, stepsPerRev), 5333334u);
+    constexpr uint32_t stepsPerRev = 1600;
+    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(0.5f, stepsPerRev), 13333u);
+    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(1.0f, stepsPerRev), 26667u);
+    EXPECT_EQ(Spindles::CStepperLogic::step_rate_millihz(5.0f, stepsPerRev), 133333u);
+    EXPECT_EQ(Spindles::CStepperLogic::acceleration_millihz_per_sec(100.0f, stepsPerRev), 2666667u);
 }
 
 TEST(LatheScaffold, ContinuousStepperRampAdvancesOutsideTheI2sIsr) {
@@ -232,7 +232,7 @@ TEST(LatheScaffold, ContinuousStepperRampPreservesFractionalProgress) {
 }
 
 TEST(LatheScaffold, CStepperGracefulStopDeadlineTracksLiveRate) {
-    constexpr uint32_t stepsPerRev = 3200;
+    constexpr uint32_t stepsPerRev = 1600;
     const uint32_t deceleration =
         Spindles::CStepperLogic::acceleration_millihz_per_sec(100.0f, stepsPerRev);
 
@@ -254,7 +254,7 @@ TEST(LatheScaffold, CStepperGracefulStopDeadlineTracksLiveRate) {
 }
 
 TEST(LatheScaffold, CStepperGracefulStopRampsThroughMinimumToZero) {
-    constexpr uint32_t stepsPerRev = 3200;
+    constexpr uint32_t stepsPerRev = 1600;
     const uint32_t deceleration =
         Spindles::CStepperLogic::acceleration_millihz_per_sec(100.0f, stepsPerRev);
     uint32_t remainder = 0;
@@ -268,7 +268,7 @@ TEST(LatheScaffold, CStepperGracefulStopRampsThroughMinimumToZero) {
 
 TEST(LatheScaffold, ContinuousSchedulerPreservesExactAverageAtCommissioningRates) {
     constexpr uint32_t timerHz = 20000000;
-    constexpr uint32_t stepsPerRev = 3200;
+    constexpr uint32_t stepsPerRev = 1600;
     const float rpms[] = { 50.0f, 200.0f, 675.0f };
 
     for (const float rpm : rpms) {
@@ -323,7 +323,7 @@ TEST(LatheScaffold, ContinuousSchedulerMovesOnlyPlannerEventsAtPulseWidthCoincid
 
 TEST(LatheScaffold, ContinuousSchedulerKeepsCExactAndRepaysPlannerMergeTiming) {
     constexpr uint32_t timerHz = 20000000;
-    constexpr uint32_t stepsPerRev = 3200;
+    constexpr uint32_t stepsPerRev = 1600;
     const uint32_t rate = Spindles::CStepperLogic::step_rate_millihz(420.0f, stepsPerRev);
     const auto command = Machine::ContinuousEventScheduler::make_rate_command(timerHz, rate);
     Machine::ContinuousEventScheduler::IntervalState continuous;
