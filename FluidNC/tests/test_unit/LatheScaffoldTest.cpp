@@ -300,16 +300,40 @@ TEST(LatheScaffold, ContinuousSchedulerRetiresOnlyOneActuallyEmittedPulse) {
     EXPECT_TRUE(Machine::ContinuousEventScheduler::pulse_was_emitted(UINT32_MAX, 0u));
 }
 
-TEST(LatheScaffold, ContinuousSchedulerPhaseAdjustmentRepaysEarlyAndLateMerges) {
-    auto command = Machine::ContinuousEventScheduler::make_rate_command(20000000, 36000000);
-    Machine::ContinuousEventScheduler::IntervalState early;
-    Machine::ContinuousEventScheduler::IntervalState late;
-    ASSERT_TRUE(Machine::ContinuousEventScheduler::apply_rate(early, command));
-    ASSERT_TRUE(Machine::ContinuousEventScheduler::apply_rate(late, command));
+TEST(LatheScaffold, ContinuousSchedulerMovesOnlyPlannerEventsAtPulseWidthCoincidences) {
+    using Action = Machine::ContinuousEventScheduler::CoincidenceAction;
 
-    Machine::ContinuousEventScheduler::retire_step(early, 40);
-    Machine::ContinuousEventScheduler::retire_step(late, -40);
-    EXPECT_EQ(early.ticks_until_step, late.ticks_until_step + 80u);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::choose_coincidence(true, 0, true, 40, 80),
+              Action::DelayPlannerToContinuous);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::choose_coincidence(true, 40, true, 0, 80),
+              Action::AdvancePlannerToContinuous);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::choose_coincidence(true, 0, true, 0, 80), Action::None);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::choose_coincidence(true, 0, true, 80, 80), Action::None);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::choose_coincidence(true, 40, false, 0, 80), Action::None);
+}
+
+TEST(LatheScaffold, ContinuousSchedulerKeepsCExactAndRepaysPlannerMergeTiming) {
+    constexpr uint32_t timerHz = 20000000;
+    constexpr uint32_t stepsPerRev = 3200;
+    const uint32_t rate = Spindles::CStepperLogic::step_rate_millihz(420.0f, stepsPerRev);
+    const auto command = Machine::ContinuousEventScheduler::make_rate_command(timerHz, rate);
+    Machine::ContinuousEventScheduler::IntervalState continuous;
+    ASSERT_TRUE(Machine::ContinuousEventScheduler::apply_rate(continuous, command));
+
+    uint64_t continuousTicks = 0;
+    for (uint32_t pulse = 0; pulse < rate / 1000U; ++pulse) {
+        continuousTicks += continuous.ticks_until_step;
+        const int32_t plannerAdjustment = (pulse & 1U) ? -40 : 40;
+        (void)Machine::ContinuousEventScheduler::adjusted_planner_period(1000, plannerAdjustment);
+        Machine::ContinuousEventScheduler::retire_step(continuous);
+    }
+
+    // One second at 420 RPM is exactly 22,400 C pulses. Planner merge
+    // compensation must never enter or perturb the continuous-C interval.
+    EXPECT_EQ(continuousTicks, static_cast<uint64_t>(timerHz));
+    EXPECT_EQ(Machine::ContinuousEventScheduler::adjusted_planner_period(1000, 40), 1040u);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::adjusted_planner_period(1000, -40), 960u);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::adjusted_planner_period(20, -40), 1u);
 }
 
 TEST(LatheScaffold, ContinuousSchedulerRateUpdatesNeverMoveAnAlreadyDuePulse) {

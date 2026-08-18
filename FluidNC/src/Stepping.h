@@ -70,8 +70,8 @@ namespace Machine {
         static uint32_t                              _plannerPeriodTicks;
         static uint32_t                              _plannerTicksUntilEvent;
         static uint32_t                              _schedulerLastIntervalTicks;
-        static bool                                  _continuousDeferredForPlanner;
-        static int32_t                               _continuousDeferredAdjustmentTicks;
+        static bool                                  _plannerDeferredForContinuous;
+        static int32_t                               _plannerDeferredAdjustmentTicks;
 
         static bool     continuousSchedulerPulse();
         static void     publishContinuousRate(uint32_t rate_millihz, bool ramping);

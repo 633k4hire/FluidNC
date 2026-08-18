@@ -122,8 +122,8 @@ bool              Stepping::_plannerSchedulerActive = false;
 uint32_t          Stepping::_plannerPeriodTicks = 100;
 uint32_t          Stepping::_plannerTicksUntilEvent = 0;
 uint32_t          Stepping::_schedulerLastIntervalTicks = 100;
-bool              Stepping::_continuousDeferredForPlanner = false;
-int32_t           Stepping::_continuousDeferredAdjustmentTicks = 0;
+bool              Stepping::_plannerDeferredForContinuous = false;
+int32_t           Stepping::_plannerDeferredAdjustmentTicks = 0;
 
 bool* Stepping::limit_var(axis_t axis, motor_t motor) {
     auto m = axis_motors[axis][motor];
@@ -267,8 +267,8 @@ void Stepping::resetPlanner() {
     __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
     _plannerSchedulerActive = false;
     _plannerTicksUntilEvent = 0;
-    _continuousDeferredForPlanner = false;
-    _continuousDeferredAdjustmentTicks = 0;
+    _plannerDeferredForContinuous = false;
+    _plannerDeferredAdjustmentTicks = 0;
 }
 
 void Stepping::reset() {
@@ -388,39 +388,44 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
     } else if (_plannerSchedulerActive && !Stepper::is_awake()) {
         _plannerSchedulerActive = false;
         _plannerTicksUntilEvent = 0;
-        _continuousDeferredForPlanner = false;
-        _continuousDeferredAdjustmentTicks = 0;
+        _plannerDeferredForContinuous = false;
+        _plannerDeferredAdjustmentTicks = 0;
     }
 
     if (_plannerSchedulerActive && _plannerTicksUntilEvent != 0) {
         ContinuousEventScheduler::elapse(_plannerTicksUntilEvent, elapsed_ticks);
     }
-    if (owner && _continuousInterval.active && !_continuousDeferredForPlanner &&
-        _continuousInterval.ticks_until_step != 0) {
+    if (owner && _continuousInterval.active && _continuousInterval.ticks_until_step != 0) {
         ContinuousEventScheduler::elapse(_continuousInterval.ticks_until_step, elapsed_ticks);
     }
 
     bool planner_due = _plannerSchedulerActive && _plannerTicksUntilEvent == 0;
-    bool continuous_due = owner && _continuousInterval.active &&
-                          !_continuousDeferredForPlanner && _continuousInterval.ticks_until_step == 0;
-    int32_t phase_adjustment = 0;
+    const bool continuous_due = owner && _continuousInterval.active &&
+                                _continuousInterval.ticks_until_step == 0;
+    int32_t planner_phase_adjustment = 0;
     const uint32_t merge_guard_ticks = std::max<uint32_t>(1U, _pulseUsecs * ticksPerMicrosecond);
+    const auto coincidence = ContinuousEventScheduler::choose_coincidence(
+        _plannerSchedulerActive,
+        _plannerTicksUntilEvent,
+        owner && _continuousInterval.active,
+        _continuousInterval.ticks_until_step,
+        merge_guard_ticks);
 
-    if (continuous_due && !planner_due && _plannerSchedulerActive &&
-        _plannerTicksUntilEvent < merge_guard_ticks) {
-        _continuousDeferredForPlanner = true;
-        _continuousDeferredAdjustmentTicks = -static_cast<int32_t>(_plannerTicksUntilEvent);
-        continuous_due = false;
-    } else if (planner_due && !continuous_due && owner && _continuousInterval.active &&
-               _continuousInterval.ticks_until_step < merge_guard_ticks) {
-        phase_adjustment = static_cast<int32_t>(_continuousInterval.ticks_until_step);
-        _continuousInterval.ticks_until_step = 0;
-        continuous_due = true;
-    } else if (planner_due && _continuousDeferredForPlanner) {
-        continuous_due = owner && _continuousInterval.active;
-        phase_adjustment = _continuousDeferredAdjustmentTicks;
-        _continuousDeferredForPlanner = false;
-        _continuousDeferredAdjustmentTicks = 0;
+    if (coincidence == ContinuousEventScheduler::CoincidenceAction::DelayPlannerToContinuous) {
+        const uint32_t delay_ticks = _continuousInterval.ticks_until_step;
+        _plannerDeferredForContinuous = true;
+        _plannerDeferredAdjustmentTicks = -static_cast<int32_t>(delay_ticks);
+        _plannerTicksUntilEvent = delay_ticks;
+        planner_due = false;
+    } else if (coincidence == ContinuousEventScheduler::CoincidenceAction::AdvancePlannerToContinuous) {
+        planner_phase_adjustment = static_cast<int32_t>(_plannerTicksUntilEvent);
+        _plannerTicksUntilEvent = 0;
+        planner_due = true;
+    }
+    if (planner_due && _plannerDeferredForContinuous) {
+        planner_phase_adjustment = _plannerDeferredAdjustmentTicks;
+        _plannerDeferredForContinuous = false;
+        _plannerDeferredAdjustmentTicks = 0;
     }
 
     if (planner_due) {
@@ -434,13 +439,16 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
                 __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
             if (ContinuousEventScheduler::pulse_was_emitted(
                     continuous_pulses_before, continuous_pulses_after)) {
-                ContinuousEventScheduler::retire_step(_continuousInterval, phase_adjustment);
+                ContinuousEventScheduler::retire_step(_continuousInterval);
             } else {
                 latchContinuousFault();
             }
         }
         _plannerSchedulerActive = planner_continues;
-        _plannerTicksUntilEvent = planner_continues ? _plannerPeriodTicks : 0;
+        _plannerTicksUntilEvent = planner_continues
+                                      ? ContinuousEventScheduler::adjusted_planner_period(
+                                            _plannerPeriodTicks, planner_phase_adjustment)
+                                      : 0;
     } else if (continuous_due) {
         AxisMask continuous_mask = 0;
         set_bitnum(continuous_mask, _continuousAxis);
@@ -454,7 +462,7 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
             __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
         if (ContinuousEventScheduler::pulse_was_emitted(
                 continuous_pulses_before, continuous_pulses_after)) {
-            ContinuousEventScheduler::retire_step(_continuousInterval, phase_adjustment);
+            ContinuousEventScheduler::retire_step(_continuousInterval);
         } else {
             latchContinuousFault();
         }
@@ -465,7 +473,7 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
     if (_plannerSchedulerActive) {
         next_ticks = std::max<uint32_t>(1U, _plannerTicksUntilEvent);
     }
-    if (owner && _continuousInterval.active && !_continuousDeferredForPlanner) {
+    if (owner && _continuousInterval.active) {
         next_ticks = std::min(next_ticks, std::max<uint32_t>(1U, _continuousInterval.ticks_until_step));
     }
     if (owner && (!_continuousInterval.active || _continuousInterval.command.ramping)) {
@@ -558,8 +566,8 @@ bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz
 
     _plannerSchedulerActive = false;
     _plannerTicksUntilEvent = 0;
-    _continuousDeferredForPlanner = false;
-    _continuousDeferredAdjustmentTicks = 0;
+    _plannerDeferredForContinuous = false;
+    _plannerDeferredAdjustmentTicks = 0;
     constexpr uint32_t service_ticks = 20000U;  // 1 ms at the fixed 20 MHz step timer.
     _schedulerLastIntervalTicks = service_ticks;
     __atomic_store_n(&_continuousOwner, true, __ATOMIC_RELEASE);
@@ -619,8 +627,8 @@ void IRAM_ATTR Stepping::emergencyStop() {
     _continuousPublishedRateMillihz = 0;
     _continuousAccelerationMillihzPerSec = 0;
     _continuousRampRemainder = 0;
-    _continuousDeferredForPlanner = false;
-    _continuousDeferredAdjustmentTicks = 0;
+    _plannerDeferredForContinuous = false;
+    _plannerDeferredAdjustmentTicks = 0;
     _continuousInterval.active = false;
     _continuousInterval.ticks_until_step = 0;
     _continuousAxis = INVALID_AXIS;

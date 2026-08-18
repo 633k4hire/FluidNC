@@ -123,18 +123,49 @@ namespace Machine::ContinuousEventScheduler {
         return 0;
     }
 
-    // phase_adjustment_ticks is positive for a pulse merged early with a
-    // planner event, and negative for a pulse deliberately delayed to one.
-    CONTINUOUS_SCHEDULER_INLINE void retire_step(IntervalState& state, int32_t phase_adjustment_ticks = 0) {
+    CONTINUOUS_SCHEDULER_INLINE void retire_step(IntervalState& state) {
         ++state.emitted_pulses;
         state.current_period_ticks = next_period(state);
-        int64_t next = static_cast<int64_t>(state.current_period_ticks) + phase_adjustment_ticks;
+        state.ticks_until_step = state.current_period_ticks;
+    }
+
+    // Continuous C is the timing master while it owns the chuck. A nearby
+    // planner event may be emitted early (positive adjustment) or late
+    // (negative adjustment), so repay that displacement in its next interval.
+    CONTINUOUS_SCHEDULER_INLINE uint32_t adjusted_planner_period(uint32_t period_ticks,
+                                                                 int32_t phase_adjustment_ticks) {
+        int64_t next = static_cast<int64_t>(period_ticks ? period_ticks : 1U) + phase_adjustment_ticks;
         if (next < 1) {
             next = 1;
         } else if (next > std::numeric_limits<uint32_t>::max()) {
             next = std::numeric_limits<uint32_t>::max();
         }
-        state.ticks_until_step = static_cast<uint32_t>(next);
+        return static_cast<uint32_t>(next);
+    }
+
+    enum class CoincidenceAction : uint8_t {
+        None,
+        DelayPlannerToContinuous,
+        AdvancePlannerToContinuous,
+    };
+
+    // Pulses closer than the configured pulse width must share one output
+    // event. Continuous C is authoritative: only the planner event moves.
+    CONTINUOUS_SCHEDULER_INLINE CoincidenceAction choose_coincidence(bool     planner_active,
+                                                                      uint32_t planner_ticks,
+                                                                      bool     continuous_active,
+                                                                      uint32_t continuous_ticks,
+                                                                      uint32_t merge_guard_ticks) {
+        if (!planner_active || !continuous_active) {
+            return CoincidenceAction::None;
+        }
+        if (planner_ticks == 0 && continuous_ticks != 0 && continuous_ticks < merge_guard_ticks) {
+            return CoincidenceAction::DelayPlannerToContinuous;
+        }
+        if (continuous_ticks == 0 && planner_ticks != 0 && planner_ticks < merge_guard_ticks) {
+            return CoincidenceAction::AdvancePlannerToContinuous;
+        }
+        return CoincidenceAction::None;
     }
 
     CONTINUOUS_SCHEDULER_INLINE uint32_t merged_step_mask(uint32_t planner_mask, uint32_t continuous_mask, bool continuous_due) {
