@@ -604,6 +604,9 @@ static void protocol_do_alarm(void* alarmVoid) {
 #ifdef TAMS_MAIJKER_ALARM_ASSETS
     record_alarm_telemetry(lastAlarm);
 #endif
+    // Alarm entry must never wait for a graceful C-spindle ramp. This also
+    // covers spindle-only operation, whose protocol state can still be Idle.
+    Stepping::emergencyStop();
     if (spindle->_off_on_alarm) {
         spindle->stop();
     }
@@ -612,25 +615,28 @@ static void protocol_do_alarm(void* alarmVoid) {
     // whereby polling_loop() does not see the state change.
     if (lastAlarm == ExecAlarm::ExpanderReset) {
         set_state(State::Critical);  // Set system alarm state
+        protocol_disable_steppers();
         alarm_msg(lastAlarm);
         report_error_message(Message::MustReboot);
         return;
     }
     if (lastAlarm == ExecAlarm::HardLimit || lastAlarm == ExecAlarm::HardStop) {
-        protocol_disable_steppers();
         Homing::set_all_axes_unhomed();
         set_state(State::Critical);  // Set system alarm state
+        protocol_disable_steppers();
         alarm_msg(lastAlarm);
         report_error_message(Message::CriticalEvent);
         return;
     }
     if (lastAlarm == ExecAlarm::SoftLimit) {
         set_state(State::Critical);  // Set system alarm state
+        protocol_disable_steppers();
         alarm_msg(lastAlarm);
         report_error_message(Message::CriticalEvent);
         return;
     }
     set_state(State::Alarm);
+    protocol_disable_steppers();
     alarm_msg(lastAlarm);
 }
 
@@ -932,6 +938,14 @@ static void protocol_do_cycle_start() {
 }
 
 void protocol_disable_steppers() {
+    if (state_is(State::Alarm) || state_is(State::Critical) ||
+        state_is(State::ConfigAlarm) || state_is(State::Sleep)) {
+        // Safety states always win over continuous/planner ownership of the
+        // shared enable line.
+        protocol_cancel_disable_steppers();
+        Axes::set_disable(true, true);
+        return;
+    }
     if (Stepping::continuousActive() || Stepper::is_awake()) {
         // Continuous C and finite planner motion share the common driver
         // enable. Never schedule idle disable while either lane is active.
@@ -942,11 +956,6 @@ void protocol_disable_steppers() {
     if (state_is(State::Homing)) {
         // Leave steppers enabled while homing
         Axes::set_disable(false, false);
-        return;
-    }
-    if (state_is(State::Sleep)) {
-        // Disable steppers immediately in sleep or alarm state
-        Axes::set_disable(true, true);
         return;
     }
     if (Stepping::_idleMsecs == 255) {
@@ -1007,7 +1016,7 @@ void protocol_do_cycle_stop() {
             if (sys.suspend().bit.jogCancel) {  // For jog cancel, flush buffers and sync positions.
                 sys.step_control = {};
                 plan_reset();
-                Stepper::reset();
+                Stepper::resetPreservingContinuous();
                 gc_sync_position();
                 plan_sync_position();
             }
@@ -1314,6 +1323,11 @@ static void protocol_do_fault_pin(void* arg) {
     log_info("Stopped by " << pin->legend());
 }
 void protocol_do_rt_reset() {
+    // Reset is an immediate machine stop, even when continuous C is the only
+    // active motion and the protocol state therefore still reads Idle.
+    Stepping::emergencyStop();
+    protocol_cancel_disable_steppers();
+    Axes::set_disable(true, true);
     if (state_is(State::Homing)) {
         Machine::Homing::fail(ExecAlarm::HomingFailReset);
     } else if (state_is(State::Cycle) || state_is(State::Jog) || sys.step_control.executeHold || sys.step_control.executeSysMotion) {

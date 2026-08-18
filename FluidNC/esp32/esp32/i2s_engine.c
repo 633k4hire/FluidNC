@@ -591,7 +591,7 @@ bool i2s_out_continuous_transport_start() {
     return true;
 }
 
-void i2s_out_continuous_transport_stop() {
+void IRAM_ATTR i2s_out_continuous_transport_stop() {
     _continuous_transport_active = false;
 }
 

@@ -388,6 +388,9 @@ void mc_override_ctrl_update(Override override_state) {
 // lost, since there was an abrupt uncontrolled deceleration. Called at an interrupt level by
 // realtime abort command and hard limits. So, keep to a minimum.
 void mc_critical(ExecAlarm alarm) {
+    // Continuous C can be active while the protocol state is Idle, so it must
+    // be stopped independently of the finite-planner motion-state test below.
+    Stepping::emergencyStop();
     if (inMotionState() || sys.step_control.executeHold || sys.step_control.executeSysMotion) {
         Stepper::reset();  // Stop stepping immediately, possibly losing position
         //        Stepper::stop_stepping();  // Stop stepping immediately, possibly losing position

@@ -77,6 +77,7 @@ namespace Machine {
         static void     publishContinuousRate(uint32_t rate_millihz, bool ramping);
         static bool     readContinuousRateCommand(ContinuousEventScheduler::RateCommand& command, uint32_t& sequence);
         static void     finishContinuousStop();
+        static void     latchContinuousFault();
         static uint32_t plannerPeakPulsesPerSecond(axis_t excluded_axis);
 
         static step_engine_t* step_engine;
@@ -115,7 +116,9 @@ namespace Machine {
 
         static void assignMotor(axis_t axis, motor_t motor, pinnum_t step_pin, bool step_invert, pinnum_t dir_pin, bool dir_invert);
 
-        static void reset();  // Clean up old state and start fresh
+        static void reset();         // Reset planner state and stop continuous C immediately
+        static void resetPlanner();  // Reset finite planner state without disturbing continuous C
+        static void emergencyStop(); // Immediately disarm only the continuous C lane
         static void beginLowLatency();
         static void endLowLatency();
 

@@ -141,6 +141,13 @@ namespace Machine::ContinuousEventScheduler {
         return continuous_due ? planner_mask | continuous_mask : planner_mask;
     }
 
+    // A due continuous event is complete only when Stepping::step() actually
+    // emitted exactly one pulse for the continuously-owned axis. Unsigned
+    // subtraction deliberately preserves the check across counter wrap.
+    CONTINUOUS_SCHEDULER_INLINE bool pulse_was_emitted(uint32_t before, uint32_t after) {
+        return after - before == 1U;
+    }
+
     CONTINUOUS_SCHEDULER_INLINE bool combined_rate_admissible(uint32_t continuous_rate_millihz,
                                                              uint32_t planner_peak_steps_per_second,
                                                              uint32_t engine_peak_steps_per_second) {

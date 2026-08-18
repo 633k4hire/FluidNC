@@ -300,12 +300,23 @@ bool Stepper::is_awake() {
     return awake;
 }
 
-// Reset and clear stepper subsystem variables
-void Stepper::reset() {
-    // Initialize Stepping driver idle state.
-    Stepping::reset();
+static void reset_stepper_state(bool preserve_continuous) {
+    if (preserve_continuous) {
+        Stepping::resetPlanner();
+    } else {
+        Stepping::reset();
+    }
 
-    go_idle();
+    if (preserve_continuous) {
+        // The cycle-stop ISR already retired the final finite pulse. Avoid a
+        // task-context unstep here because continuous C may be emitting its
+        // next independent pulse at the same instant.
+        awake = false;
+        st.step_outbits = 0;
+        protocol_disable_steppers();
+    } else {
+        Stepper::go_idle();
+    }
 
     // Initialize stepper algorithm variables.
     memset(&prep, 0, sizeof(st_prep_t));
@@ -318,6 +329,17 @@ void Stepper::reset() {
     st.step_outbits     = 0;
     st.dir_outbits      = 0;  // Initialize direction bits to default.
     // TODO do we need to turn step pins off?
+}
+
+// Reset and clear stepper subsystem variables, including continuous C.
+void Stepper::reset() {
+    reset_stepper_state(false);
+}
+
+// Jog cancellation owns only finite planner motion. The continuous C spindle
+// remains armed and keeps the shared driver enable asserted.
+void Stepper::resetPreservingContinuous() {
+    reset_stepper_state(true);
 }
 
 // Called by planner_recalculate() when the executing block is updated by the new plan.

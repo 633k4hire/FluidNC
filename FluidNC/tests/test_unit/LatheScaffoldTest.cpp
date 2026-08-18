@@ -293,6 +293,13 @@ TEST(LatheScaffold, ContinuousSchedulerMergesOnlyTheDueCAxisBit) {
     EXPECT_EQ(Machine::ContinuousEventScheduler::merged_step_mask(0x03u, 0x20u, true), 0x23u);
 }
 
+TEST(LatheScaffold, ContinuousSchedulerRetiresOnlyOneActuallyEmittedPulse) {
+    EXPECT_FALSE(Machine::ContinuousEventScheduler::pulse_was_emitted(41u, 41u));
+    EXPECT_TRUE(Machine::ContinuousEventScheduler::pulse_was_emitted(41u, 42u));
+    EXPECT_FALSE(Machine::ContinuousEventScheduler::pulse_was_emitted(41u, 43u));
+    EXPECT_TRUE(Machine::ContinuousEventScheduler::pulse_was_emitted(UINT32_MAX, 0u));
+}
+
 TEST(LatheScaffold, ContinuousSchedulerPhaseAdjustmentRepaysEarlyAndLateMerges) {
     auto command = Machine::ContinuousEventScheduler::make_rate_command(20000000, 36000000);
     Machine::ContinuousEventScheduler::IntervalState early;

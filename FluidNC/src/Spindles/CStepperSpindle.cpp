@@ -10,6 +10,7 @@
 #include "LatheEncoder.h"
 #include "Machine/Axes.h"
 #include "Machine/MachineConfig.h"
+#include "MotionControl.h"
 #include "Planner.h"
 #include "Protocol.h"
 #include "Stepping.h"
@@ -206,11 +207,11 @@ namespace Spindles {
         if (stopTimedOut) {
             _lastControlActionFailed = true;
             log_error(name() << " graceful stop exceeded its calculated deadline");
-            send_alarm(ExecAlarm::SpindleControl);
+            mc_critical(ExecAlarm::SpindleControl);
         } else if (stopFaulted) {
             _lastControlActionFailed = true;
             log_error(name() << " stopped during deceleration: C scheduler or I2S transport fault");
-            send_alarm(ExecAlarm::SpindleControl);
+            mc_critical(ExecAlarm::SpindleControl);
         }
     }
 
@@ -237,7 +238,7 @@ namespace Spindles {
             log_error(name() << " stopped: C scheduler or I2S transport fault");
             _lastControlActionFailed = true;
             stopStream(true);
-            send_alarm(ExecAlarm::SpindleControl);
+            mc_critical(ExecAlarm::SpindleControl);
             return;
         }
         Machine::Stepping::serviceContinuous();

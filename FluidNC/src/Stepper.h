@@ -30,6 +30,8 @@ namespace Stepper {
 
     // Reset the stepper subsystem variables
     void reset();
+    // Flush finite planner motion while leaving a continuously-owned C spindle running.
+    void resetPreservingContinuous();
 
     // Changes the run state of the step segment buffer to execute the special parking motion.
     void parking_setup_buffer();
