@@ -16,8 +16,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdio>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace LatheDiagnostics {
     namespace {
@@ -94,6 +95,32 @@ namespace LatheDiagnostics {
             }
             return out;
         }
+
+        void appendFixed6(std::string& out, double value) {
+            const bool   negative  = value < 0.0;
+            const double magnitude = negative ? -value : value;
+            if (!std::isfinite(magnitude) ||
+                magnitude > static_cast<double>(std::numeric_limits<uint64_t>::max() / 1000000ULL)) {
+                out += "null";
+                return;
+            }
+
+            const uint64_t scaled = static_cast<uint64_t>(magnitude * 1000000.0 + 0.5);
+            const uint64_t whole  = scaled / 1000000ULL;
+            const uint32_t fraction = static_cast<uint32_t>(scaled % 1000000ULL);
+
+            if (negative) out += '-';
+            out += std::to_string(whole);
+            out += '.';
+
+            char     digits[6];
+            uint32_t remaining = fraction;
+            for (int index = 5; index >= 0; --index) {
+                digits[index] = static_cast<char>('0' + (remaining % 10));
+                remaining /= 10;
+            }
+            out.append(digits, sizeof(digits));
+        }
     }
 
     void recordLine(const char* source, const char* line, Error result) {
@@ -152,10 +179,8 @@ namespace LatheDiagnostics {
     }
 
     std::string snapshotJson() {
-        std::array<Event, EventCount> copy;
         uint32_t cursor;
         portENTER_CRITICAL(&mux);
-        copy = events;
         cursor = eventCursor;
         portEXIT_CRITICAL(&mux);
 
@@ -163,53 +188,96 @@ namespace LatheDiagnostics {
         i2s_out_get_diagnostics(&i2s);
         const axis_t cAxis = Lathe::c_axis();
 
-        std::string json =
-            "{\"schema_version\":1,\"device\":\"dlc32\",\"uptime_ms\":" +
-            std::to_string(millis()) + ",\"reset_reason\":" +
-            std::to_string(static_cast<int>(esp_reset_reason())) +
-            ",\"free_heap\":" + std::to_string(xPortGetFreeHeapSize()) +
-            ",\"state\":\"" + escape(state_name()) + "\",\"planner_busy\":" +
-            (plan_get_current_block() ? "true" : "false") +
-            ",\"steppers\":{\"awake\":" + (Stepper::is_awake() ? "true" : "false") +
-            ",\"drivers_disabled\":" + (Machine::Axes::disabled ? "true" : "false") +
-            ",\"idle_ms\":" + std::to_string(Stepping::_idleMsecs) +
-            ",\"wake_count\":" + std::to_string(stepperWakeCount) +
-            ",\"idle_count\":" + std::to_string(stepperIdleCount) +
-            ",\"last_wake_ms\":" + std::to_string(lastStepperWakeMs) +
-            ",\"last_idle_ms\":" + std::to_string(lastStepperIdleMs) +
-            "},\"i2s\":{\"underruns\":" + std::to_string(i2s.underruns) +
-            ",\"max_isr_gap_us\":" + std::to_string(i2s.max_isr_gap_us) +
-            ",\"max_isr_duration_us\":" + std::to_string(i2s.max_isr_duration_us) +
-            ",\"planner_active\":" + (i2s.planner_active ? "true" : "false") +
-            ",\"planner_interval_ticks\":" + std::to_string(i2s.planner_interval_ticks) +
-            ",\"planner_interval_frames\":" + std::to_string(i2s.planner_interval_frames) +
-            ",\"planner_fractional_residual_ticks\":" + std::to_string(i2s.planner_fractional_residual_ticks) +
-            ",\"planner_scheduled_ticks\":" + std::to_string(i2s.planner_scheduled_ticks) +
-            ",\"planner_emitted_frames\":" + std::to_string(i2s.planner_emitted_frames) +
-            ",\"planner_emitted_intervals\":" + std::to_string(i2s.planner_emitted_intervals) +
-            ",\"transport_faulted\":" + (i2s.transport_faulted ? "true" : "false") +
-            "},\"c_planner\":{\"steps\":" + std::to_string(Machine::Stepping::getSteps(cAxis)) +
-            ",\"position_degrees\":" + std::to_string(get_mpos()[cAxis]) +
-            ",\"continuous_active\":" + (Machine::Stepping::continuousActive() ? "true" : "false") +
-            ",\"continuous_target_millihz\":" + std::to_string(Machine::Stepping::continuousTargetRateMillihz()) +
-            ",\"continuous_scheduled_millihz\":" + std::to_string(Machine::Stepping::continuousRateMillihz()) +
-            ",\"continuous_pulses\":" + std::to_string(Machine::Stepping::continuousPulseCount()) +
-            ",\"continuous_faulted\":" + (Machine::Stepping::continuousFaulted() ? "true" : "false") +
-            "},\"input\":{\"line_count\":" + std::to_string(lineCount) +
-            ",\"jog_count\":" + std::to_string(jogCount) +
-            ",\"home_count\":" + std::to_string(homeCount) +
-            ",\"spindle_count\":" + std::to_string(spindleCount) +
-            ",\"lathe_status_queries\":" + std::to_string(statusQueryCount) +
-            ",\"realtime_status_queries\":" + std::to_string(realtimeStatusCount) +
-            ",\"reset_count\":" + std::to_string(resetCount) +
-            ",\"jog_cancel_count\":" + std::to_string(jogCancelCount) +
-            "},\"recent_events\":[";
+        std::string json;
+        json.reserve(4096);
+        json += "{\"schema_version\":1,\"device\":\"dlc32\",\"uptime_ms\":";
+        json += std::to_string(millis());
+        json += ",\"reset_reason\":";
+        json += std::to_string(static_cast<int>(esp_reset_reason()));
+        json += ",\"free_heap\":";
+        json += std::to_string(xPortGetFreeHeapSize());
+        json += ",\"state\":\"";
+        json += escape(state_name());
+        json += "\",\"planner_busy\":";
+        json += plan_get_current_block() ? "true" : "false";
+        json += ",\"steppers\":{\"awake\":";
+        json += Stepper::is_awake() ? "true" : "false";
+        json += ",\"drivers_disabled\":";
+        json += Machine::Axes::disabled ? "true" : "false";
+        json += ",\"idle_ms\":";
+        json += std::to_string(Stepping::_idleMsecs);
+        json += ",\"wake_count\":";
+        json += std::to_string(stepperWakeCount);
+        json += ",\"idle_count\":";
+        json += std::to_string(stepperIdleCount);
+        json += ",\"last_wake_ms\":";
+        json += std::to_string(lastStepperWakeMs);
+        json += ",\"last_idle_ms\":";
+        json += std::to_string(lastStepperIdleMs);
+        json += "},\"i2s\":{\"underruns\":";
+        json += std::to_string(i2s.underruns);
+        json += ",\"max_isr_gap_us\":";
+        json += std::to_string(i2s.max_isr_gap_us);
+        json += ",\"max_isr_duration_us\":";
+        json += std::to_string(i2s.max_isr_duration_us);
+        json += ",\"planner_active\":";
+        json += i2s.planner_active ? "true" : "false";
+        json += ",\"planner_interval_ticks\":";
+        json += std::to_string(i2s.planner_interval_ticks);
+        json += ",\"planner_interval_frames\":";
+        json += std::to_string(i2s.planner_interval_frames);
+        json += ",\"planner_fractional_residual_ticks\":";
+        json += std::to_string(i2s.planner_fractional_residual_ticks);
+        json += ",\"planner_scheduled_ticks\":";
+        json += std::to_string(i2s.planner_scheduled_ticks);
+        json += ",\"planner_emitted_frames\":";
+        json += std::to_string(i2s.planner_emitted_frames);
+        json += ",\"planner_emitted_intervals\":";
+        json += std::to_string(i2s.planner_emitted_intervals);
+        json += ",\"transport_faulted\":";
+        json += i2s.transport_faulted ? "true" : "false";
+        json += "},\"c_planner\":{\"steps\":";
+        json += std::to_string(Machine::Stepping::getSteps(cAxis));
+        json += ",\"position_degrees\":";
+        appendFixed6(json, get_mpos()[cAxis]);
+        json += ",\"continuous_active\":";
+        json += Machine::Stepping::continuousActive() ? "true" : "false";
+        json += ",\"continuous_target_millihz\":";
+        json += std::to_string(Machine::Stepping::continuousTargetRateMillihz());
+        json += ",\"continuous_scheduled_millihz\":";
+        json += std::to_string(Machine::Stepping::continuousRateMillihz());
+        json += ",\"continuous_pulses\":";
+        json += std::to_string(Machine::Stepping::continuousPulseCount());
+        json += ",\"continuous_faulted\":";
+        json += Machine::Stepping::continuousFaulted() ? "true" : "false";
+        json += "},\"input\":{\"line_count\":";
+        json += std::to_string(lineCount);
+        json += ",\"jog_count\":";
+        json += std::to_string(jogCount);
+        json += ",\"home_count\":";
+        json += std::to_string(homeCount);
+        json += ",\"spindle_count\":";
+        json += std::to_string(spindleCount);
+        json += ",\"lathe_status_queries\":";
+        json += std::to_string(statusQueryCount);
+        json += ",\"realtime_status_queries\":";
+        json += std::to_string(realtimeStatusCount);
+        json += ",\"reset_count\":";
+        json += std::to_string(resetCount);
+        json += ",\"jog_cancel_count\":";
+        json += std::to_string(jogCancelCount);
+        json += "},\"recent_events\":[";
 
         const uint32_t count = std::min<uint32_t>(cursor, EventCount);
+        uint32_t emitted = 0;
         for (uint32_t offset = 0; offset < count; ++offset) {
             const uint32_t sequence = cursor - offset;
-            const Event& event = copy[(sequence - 1) % EventCount];
-            if (offset) json += ",";
+            Event event;
+            portENTER_CRITICAL(&mux);
+            event = events[(sequence - 1) % EventCount];
+            portEXIT_CRITICAL(&mux);
+            if (event.sequence != sequence) continue;
+            if (emitted++) json += ",";
             json += "{\"sequence\":" + std::to_string(event.sequence) +
                     ",\"timestamp_ms\":" + std::to_string(event.timestampMs) +
                     ",\"kind\":\"" + escape(event.kind) + "\",\"source\":\"" +
