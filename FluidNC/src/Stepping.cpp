@@ -355,6 +355,25 @@ bool IRAM_ATTR Stepping::readContinuousRateCommand(ContinuousEventScheduler::Rat
     return true;
 }
 
+bool IRAM_ATTR Stepping::emitContinuousPulse() {
+    if (_continuousAxis >= MAX_N_AXIS ||
+        !__atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE)) {
+        return false;
+    }
+
+    AxisMask continuous_mask = 0;
+    set_bitnum(continuous_mask, _continuousAxis);
+    const uint32_t pulses_before =
+        __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&_continuousPulseDue, true, __ATOMIC_RELEASE);
+    step(continuous_mask, _previousDirectionMask == 65535 ? direction_mask : _previousDirectionMask);
+    unstep();
+    __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
+    const uint32_t pulses_after =
+        __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
+    return ContinuousEventScheduler::pulse_was_emitted(pulses_before, pulses_after);
+}
+
 bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
     if (!__atomic_load_n(&_continuousSchedulerActive, __ATOMIC_ACQUIRE)) {
         return Stepper::pulse_func();
@@ -437,8 +456,14 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
         if (continuous_due) {
             const uint32_t continuous_pulses_after =
                 __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
-            if (ContinuousEventScheduler::pulse_was_emitted(
-                    continuous_pulses_before, continuous_pulses_after)) {
+            const bool emitted_with_planner = ContinuousEventScheduler::pulse_was_emitted(
+                continuous_pulses_before, continuous_pulses_after);
+            const bool emitted_at_planner_end =
+                !emitted_with_planner &&
+                ContinuousEventScheduler::missing_due_pulse_action(planner_continues) ==
+                    ContinuousEventScheduler::MissingDuePulseAction::EmitContinuousOnly &&
+                emitContinuousPulse();
+            if (emitted_with_planner || emitted_at_planner_end) {
                 ContinuousEventScheduler::retire_step(_continuousInterval);
             } else {
                 latchContinuousFault();
@@ -450,18 +475,7 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
                                             _plannerPeriodTicks, planner_phase_adjustment)
                                       : 0;
     } else if (continuous_due) {
-        AxisMask continuous_mask = 0;
-        set_bitnum(continuous_mask, _continuousAxis);
-        const uint32_t continuous_pulses_before =
-            __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&_continuousPulseDue, true, __ATOMIC_RELEASE);
-        step(continuous_mask, _previousDirectionMask == 65535 ? direction_mask : _previousDirectionMask);
-        unstep();
-        __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
-        const uint32_t continuous_pulses_after =
-            __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
-        if (ContinuousEventScheduler::pulse_was_emitted(
-                continuous_pulses_before, continuous_pulses_after)) {
+        if (emitContinuousPulse()) {
             ContinuousEventScheduler::retire_step(_continuousInterval);
         } else {
             latchContinuousFault();

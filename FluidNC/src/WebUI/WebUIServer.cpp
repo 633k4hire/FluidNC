@@ -587,6 +587,7 @@ namespace {
         command.trim();
         command.toUpperCase();
         return command == "?" || command == "$G" || command == "ESP421" || command == "[ESP421]" ||
+               command == "ESP430" || command == "[ESP430]" ||
                command == "ESP424" || command == "[ESP424]" || command == "ESP426" ||
                command == "[ESP426]" || command == "ESP425" || command == "[ESP425]";
     }

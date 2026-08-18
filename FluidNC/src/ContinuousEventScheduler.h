@@ -149,6 +149,11 @@ namespace Machine::ContinuousEventScheduler {
         AdvancePlannerToContinuous,
     };
 
+    enum class MissingDuePulseAction : uint8_t {
+        Fault,
+        EmitContinuousOnly,
+    };
+
     // Pulses closer than the configured pulse width must share one output
     // event. Continuous C is authoritative: only the planner event moves.
     CONTINUOUS_SCHEDULER_INLINE CoincidenceAction choose_coincidence(bool     planner_active,
@@ -177,6 +182,15 @@ namespace Machine::ContinuousEventScheduler {
     // subtraction deliberately preserves the check across counter wrap.
     CONTINUOUS_SCHEDULER_INLINE bool pulse_was_emitted(uint32_t before, uint32_t after) {
         return after - before == 1U;
+    }
+
+    // Stepper::pulse_func() returns false without calling Stepping::step() when
+    // a finite planner move reaches its normal end. If C was due on that exact
+    // scheduler event, emit C by itself. A missing C pulse while the planner
+    // continues is still a real merge/output fault and must fail closed.
+    CONTINUOUS_SCHEDULER_INLINE MissingDuePulseAction missing_due_pulse_action(bool planner_continues) {
+        return planner_continues ? MissingDuePulseAction::Fault
+                                 : MissingDuePulseAction::EmitContinuousOnly;
     }
 
     CONTINUOUS_SCHEDULER_INLINE bool combined_rate_admissible(uint32_t continuous_rate_millihz,

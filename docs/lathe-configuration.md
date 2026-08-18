@@ -176,6 +176,13 @@ When `lathe.encoder_enable: true`, firmware initializes the configured `encoder_
 
 `ESP421` reports whether encoder capture is active, the configured pulses per revolution, measured RPM, index availability, angular position, revolution count, stale state, and fault state. Hardware validation is still required on the target machine before enabling threading cuts in material.
 
+`ESP430` is the compact live-spindle companion used by the wired M5Dial while
+the shared chuck is in spindle mode. It refreshes spindle state, commanded and
+open-loop RPM, stop progress, and measured-RPM health, and renews the spindle
+operator heartbeat. It deliberately omits static configuration, turret state,
+and full I2S diagnostics so a one-second DRO refresh does not repeatedly build
+and transmit the multi-kilobyte `ESP421` document during motion.
+
 ## Phase-synchronized threading trajectory
 
 `G32/G33` threading blocks now carry the Z start, Z target, pitch, path length, and synchronization state into the planner. At stepper segment preparation time, the first segment waits for the next encoder index count, captures the synchronized starting spindle revolution, and advances block progress from live spindle revolutions instead of ordinary feed override timing. If feedback becomes stale/faulted, RPM disappears, or feed hold is requested during a threading block, firmware raises the lathe synchronization alarm and requires the operator to restart and re-sync the pass rather than resuming mid-thread.

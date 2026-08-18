@@ -927,6 +927,33 @@ namespace WebUI {
             return Error::Ok;
         }
 
+        static Error showLatheLiveStatusJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP430
+            // The pendant polls this compact document while C is rotating. It
+            // keeps the spindle operator watchdog alive without formatting and
+            // transmitting the full configuration/diagnostics document once
+            // per second.
+            spindle->operatorHeartbeat();
+            JSONencoder j(&out);
+            j.begin();
+            j.member("cmd", "430");
+            j.member("status", "ok");
+            j.begin_array("data");
+            j.id_value_object("Lathe enabled", Lathe::enabled() ? "true" : "false");
+            j.id_value_object("Spindle state", spindle->isStopping() ? "STOPPING" : spindle_state_name(spindle->get_state()));
+            j.id_value_object("Shared chuck mode", Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()));
+            j.id_value_object("Spindle commanded RPM", float_string(spindle->commandedRpm()));
+            j.id_value_object("Spindle open-loop RPM", float_string(spindle->openLoopRpm()));
+            j.id_value_object("Spindle stopping", spindle->isStopping() ? "true" : "false");
+            j.id_value_object("Spindle stop remaining ms", int32_t(spindle->stopRemainingMs()));
+            const auto feedback = spindle->latheFeedback().status();
+            j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
+            j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
+            j.id_value_object("Feedback fault", feedback.fault ? "true" : "false");
+            j.end_array();
+            j.end();
+            return Error::Ok;
+        }
+
         static bool get_float_param(const char* parameter, const char* key, float& value) {
             std::string text;
             if (!get_param(parameter, key, text)) {
@@ -1145,6 +1172,7 @@ namespace WebUI {
             // WA - need admin password to set
             new WebCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
             new WebCommand(NULL, WEBCMD, WU, "ESP421", "System/Lathe", showLatheStatusJSON, anyState);
+            new WebCommand(NULL, WEBCMD, WU, "ESP430", "System/LatheLive", showLatheLiveStatusJSON, anyState);
             // Physical serial commands run as guest. ESP425 is deliberately
             // read-only, so keep it guest-readable without weakening the
             // administrator requirement on the bounded control commands.

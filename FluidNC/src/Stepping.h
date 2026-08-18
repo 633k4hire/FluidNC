@@ -74,6 +74,7 @@ namespace Machine {
         static int32_t                               _plannerDeferredAdjustmentTicks;
 
         static bool     continuousSchedulerPulse();
+        static bool     emitContinuousPulse();
         static void     publishContinuousRate(uint32_t rate_millihz, bool ramping);
         static bool     readContinuousRateCommand(ContinuousEventScheduler::RateCommand& command, uint32_t& sequence);
         static void     finishContinuousStop();

@@ -300,6 +300,15 @@ TEST(LatheScaffold, ContinuousSchedulerRetiresOnlyOneActuallyEmittedPulse) {
     EXPECT_TRUE(Machine::ContinuousEventScheduler::pulse_was_emitted(UINT32_MAX, 0u));
 }
 
+TEST(LatheScaffold, ContinuousSchedulerFallsBackOnlyAtNormalPlannerCompletion) {
+    using Action = Machine::ContinuousEventScheduler::MissingDuePulseAction;
+
+    EXPECT_EQ(Machine::ContinuousEventScheduler::missing_due_pulse_action(false),
+              Action::EmitContinuousOnly);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::missing_due_pulse_action(true),
+              Action::Fault);
+}
+
 TEST(LatheScaffold, ContinuousSchedulerMovesOnlyPlannerEventsAtPulseWidthCoincidences) {
     using Action = Machine::ContinuousEventScheduler::CoincidenceAction;
 
