@@ -403,44 +403,40 @@ namespace LatheDiagnostics {
         const uint32_t head = Lathe::encoder_timing_trace_head();
         const uint32_t first = head > WindowCount ? head - WindowCount + 1U : 1U;
 
+        // Keep the complete 2.56 second ring, but serialize each window as a
+        // compact numeric tuple.  The former object-per-window response grew
+        // large enough that AsyncWebServer needed two sizeable contiguous
+        // allocations and could return an empty HTTP 200 on the DLC32 after a
+        // full capture.  Field names are published once and analysis remains
+        // off the motion controller.
         std::string json;
-        json.reserve(16384);
-        json += "{\"schema_version\":1,\"kind\":\"encoder-timing\",\"pulses_per_revolution\":";
+        json.reserve(10240);
+        json += "{\"schema_version\":2,\"kind\":\"encoder-timing\",\"pulses_per_revolution\":";
         json += std::to_string(ppr);
         json += ",\"window_us\":20000,\"head_sequence\":";
         json += std::to_string(head);
-        json += ",\"samples\":[";
+        json += ",\"sample_fields\":[\"sequence\",\"start_us\",\"end_us\",\"period_count\",\"min_period_us\",\"max_period_us\",\"period_sum_us\"],\"samples\":[";
 
         uint32_t emitted = 0;
         for (uint32_t sequence = first; sequence != 0 && sequence <= head; ++sequence) {
             Lathe::EncoderTimingWindow sample;
             if (!Lathe::encoder_timing_trace_sample(sequence, sample)) continue;
             if (emitted++) json += ',';
-            json += "{\"sequence\":";
+            json += '[';
             json += std::to_string(sample.sequence);
-            json += ",\"start_us\":";
+            json += ',';
             json += std::to_string(sample.start_us);
-            json += ",\"end_us\":";
+            json += ',';
             json += std::to_string(sample.end_us);
-            json += ",\"duration_us\":";
-            json += std::to_string(sample.end_us - sample.start_us);
-            json += ",\"period_count\":";
+            json += ',';
             json += std::to_string(sample.period_count);
-            json += ",\"min_period_us\":";
+            json += ',';
             json += std::to_string(sample.min_period_us);
-            json += ",\"max_period_us\":";
+            json += ',';
             json += std::to_string(sample.max_period_us);
-            json += ",\"period_sum_us\":";
+            json += ',';
             json += std::to_string(sample.period_sum_us);
-            json += ",\"rpm\":";
-            if (sample.period_sum_us != 0 && ppr != 0) {
-                appendFixed6(json,
-                             (60.0 * 1000000.0 * static_cast<double>(sample.period_count)) /
-                                 (static_cast<double>(sample.period_sum_us) * static_cast<double>(ppr)));
-            } else {
-                json += "null";
-            }
-            json += '}';
+            json += ']';
         }
         json += "]}";
         return json;
