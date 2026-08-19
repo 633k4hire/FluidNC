@@ -52,7 +52,7 @@ namespace Spindles {
         _stopping      = false;
         _stopStartedMs = 0;
         _stopDeadlineMs = 0;
-        _cReferenceValid = true;
+        _cReferenceValid = false;
         _lastOperatorHeartbeatMs = millis();
         init_atc();
         config_message();
@@ -198,11 +198,12 @@ namespace Spindles {
         gc_state.modal.spindle      = SpindleState::Disable;
         gc_state.spindle_speed      = 0.0f;
         gc_state.lathe_commanded_rpm = 0.0f;
-        Lathe::note_shared_chuck_spindle_state(SpindleState::Disable);
 
         // Spindle rotation is deliberately outside the planner coordinate
-        // frame. Once stopped, define that physical location as relative C0.
-        establishRelativeCZero();
+        // frame. Once stopped, hand its physical Index-referenced angle back
+        // to the finite C planner at the nearest configured microstep.
+        establishStoppedCReference();
+        Lathe::note_shared_chuck_spindle_state(SpindleState::Disable);
         protocol_disable_steppers();
         if (stopTimedOut) {
             _lastControlActionFailed = true;
@@ -215,13 +216,19 @@ namespace Spindles {
         }
     }
 
-    void CStepper::establishRelativeCZero() {
+    void CStepper::establishStoppedCReference() {
         if (!inMotionState() && plan_get_current_block() == nullptr) {
-            Machine::Stepping::setSteps(static_cast<axis_t>(_axis), 0);
+            const auto feedback = Lathe::configured_spindle_feedback().status();
+            const bool indexed = feedback.has_indexed_angle && feedback.has_angular_position;
+            const steps_t stopped_steps = indexed
+                                              ? static_cast<steps_t>(CStepperLogic::indexed_angle_steps(
+                                                    feedback.angular_position_rev, _stepsPerRevolution))
+                                              : 0;
+            Machine::Stepping::setSteps(static_cast<axis_t>(_axis), stopped_steps);
             plan_sync_position();
             gc_sync_position();
             _positionSyncPending = false;
-            _cReferenceValid     = true;
+            _cReferenceValid     = indexed;
         } else {
             _positionSyncPending = true;
             _cReferenceValid     = false;
@@ -243,7 +250,7 @@ namespace Spindles {
         }
         Machine::Stepping::serviceContinuous();
         if (_positionSyncPending && !inMotionState() && plan_get_current_block() == nullptr) {
-            establishRelativeCZero();
+            establishStoppedCReference();
         }
         if (_operatorWatchdogMs == 0 || !Machine::Stepping::continuousActive()) {
             return;
@@ -284,9 +291,9 @@ namespace Spindles {
             return "ROTATING";
         }
         if (_positionSyncPending) {
-            return "PENDING_RELATIVE_ZERO";
+            return "PENDING_INDEX_HANDOFF";
         }
-        return _cReferenceValid ? "RELATIVE_ZERO" : "INVALID";
+        return _cReferenceValid ? "INDEXED_ANGLE" : "RELATIVE_ZERO_NO_INDEX";
     }
 
     void CStepper::config_message() {

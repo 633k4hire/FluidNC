@@ -872,7 +872,7 @@ namespace WebUI {
                                                 ? "FAULT"
                                                 : shared_chuck_mode == Lathe::SharedChuckMode::Spindle
                                                       ? "SPINDLE"
-                                                      : strcmp(spindle->cReferenceName(), "PENDING_RELATIVE_ZERO") == 0
+                                                      : strcmp(spindle->cReferenceName(), "PENDING_INDEX_HANDOFF") == 0
                                                             ? "TRANSITION"
                                                             : "POSITIONING";
             j.id_value_object("I2S FIFO threshold", int32_t(i2s_diagnostics.fifo_threshold));
@@ -919,6 +919,7 @@ namespace WebUI {
             j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
             j.id_value_object("Feedback index", feedback.has_index_pulse ? "true" : "false");
             j.id_value_object("Feedback angular position", feedback.has_angular_position ? "true" : "false");
+            j.id_value_object("Feedback indexed angle", feedback.has_indexed_angle ? "true" : "false");
             j.id_value_object("Feedback angular rev", feedback.has_angular_position ? float_string(feedback.angular_position_rev) : "not available");
             j.id_value_object("Feedback revolution count", int32_t(feedback.revolution_count));
             j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
@@ -950,6 +951,8 @@ namespace WebUI {
             j.id_value_object("Spindle stop remaining ms", int32_t(spindle->stopRemainingMs()));
             const auto feedback = spindle->latheFeedback().status();
             j.id_value_object("Feedback measured RPM", feedback.has_measured_rpm ? float_string(feedback.measured_rpm) : "not available");
+            j.id_value_object("Feedback indexed angle", feedback.has_indexed_angle ? "true" : "false");
+            j.id_value_object("Feedback angular rev", feedback.has_angular_position ? float_string(feedback.angular_position_rev) : "not available");
             j.id_value_object("Feedback stale", feedback.stale ? "true" : "false");
             j.id_value_object("Feedback fault", feedback.fault ? "true" : "false");
             j.end_array();

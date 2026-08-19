@@ -15,6 +15,7 @@ TEST(LatheScaffold, FeedbackStatusDefaultsToNoHardwareCapabilities) {
     EXPECT_FALSE(status.has_measured_rpm);
     EXPECT_FALSE(status.has_index_pulse);
     EXPECT_FALSE(status.has_angular_position);
+    EXPECT_FALSE(status.has_indexed_angle);
     EXPECT_FALSE(status.stale);
     EXPECT_FALSE(status.fault);
 }
@@ -88,6 +89,7 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     EXPECT_TRUE(status.has_measured_rpm);
     EXPECT_TRUE(status.has_index_pulse);
     EXPECT_TRUE(status.has_angular_position);
+    EXPECT_TRUE(status.has_indexed_angle);
     EXPECT_FALSE(status.stale);
     EXPECT_EQ(status.commanded_rpm, 600);
     EXPECT_NEAR(status.measured_rpm, 600.0f, 0.001f);
@@ -159,6 +161,56 @@ TEST(LatheScaffold, IndexIsObservedButDoesNotGateOrFaultQuadratureFeedback) {
     EXPECT_TRUE(withIndex.has_index_pulse);
     EXPECT_EQ(withIndex.index_count, 1u);
     EXPECT_FALSE(withIndex.fault);
+}
+
+TEST(LatheScaffold, IndexAnchorsNormalizedAngleInBothDirectionsAndSurvivesStop) {
+    Lathe::EncoderSpindleFeedback feedback;
+    feedback.configure(100, 250);
+    uint32_t timestamp = 1000000;
+    for (int pulse = 0; pulse < 10; ++pulse) {
+        feedback.record_pulse(timestamp += 1000, 1);
+    }
+    feedback.record_index(timestamp);
+    for (int pulse = 0; pulse < 25; ++pulse) {
+        feedback.record_pulse(timestamp += 1000, 1);
+    }
+
+    auto forward = feedback.status_at(timestamp / 1000U);
+    EXPECT_TRUE(forward.has_indexed_angle);
+    EXPECT_NEAR(forward.angular_position_rev, 0.25f, 0.001f);
+
+    for (int pulse = 0; pulse < 30; ++pulse) {
+        feedback.record_pulse(timestamp += 1000, -1);
+    }
+    auto reverse = feedback.status_at(timestamp / 1000U);
+    EXPECT_NEAR(reverse.angular_position_rev, 0.95f, 0.001f);
+
+    feedback.record_index(timestamp);
+    for (int pulse = 0; pulse < 10; ++pulse) {
+        feedback.record_pulse(timestamp += 1000, 1);
+    }
+    auto reindexed = feedback.status_at(timestamp / 1000U + 1000U);
+    EXPECT_TRUE(reindexed.stale);
+    EXPECT_TRUE(reindexed.has_indexed_angle);
+    EXPECT_NEAR(reindexed.angular_position_rev, 0.10f, 0.001f);
+}
+
+TEST(LatheScaffold, DisplayRpmAggregatesIrregularEdgesOverMultipleTimingWindows) {
+    Lathe::EncoderSpindleFeedback feedback;
+    feedback.configure(1000, 250);
+    uint32_t timestamp = 1000000;
+    feedback.record_pulse(timestamp, 1);
+    for (int pulse = 0; pulse < 800; ++pulse) {
+        // Individual encoder subdivisions are deliberately very uneven, but
+        // each pair totals 286 us (143 us average, about 419.58 RPM).
+        timestamp += (pulse & 1) ? 206U : 80U;
+        feedback.record_pulse(timestamp, 1);
+    }
+
+    const auto status = feedback.status_at(timestamp / 1000U);
+    EXPECT_TRUE(status.has_measured_rpm);
+    EXPECT_NEAR(status.measured_rpm, 419.58f, 0.5f);
+    EXPECT_TRUE(status.raw_period_us == 80U || status.raw_period_us == 206U);
 }
 
 
@@ -307,6 +359,15 @@ TEST(LatheScaffold, ContinuousSchedulerPreservesExactAverageAtCommissioningRates
         const uint64_t expectedTicks = (static_cast<uint64_t>(timerHz) * 1000ULL * stepsPerRev) / rate;
         EXPECT_EQ(scheduledTicks, expectedTicks) << "RPM " << rpm;
     }
+}
+
+TEST(LatheScaffold, IndexedAngleRoundsToNearestConfiguredCStepAndWraps) {
+    constexpr uint32_t stepsPerRev = 1600;
+    EXPECT_EQ(Spindles::CStepperLogic::indexed_angle_steps(0.0f, stepsPerRev), 0);
+    EXPECT_EQ(Spindles::CStepperLogic::indexed_angle_steps(0.25f, stepsPerRev), 400);
+    EXPECT_EQ(Spindles::CStepperLogic::indexed_angle_steps(0.5f, stepsPerRev), 800);
+    EXPECT_EQ(Spindles::CStepperLogic::indexed_angle_steps(0.9999f, stepsPerRev), 0);
+    EXPECT_EQ(Spindles::CStepperLogic::indexed_angle_steps(-0.25f, stepsPerRev), 1200);
 }
 
 TEST(LatheScaffold, ContinuousSchedulerMergesOnlyTheDueCAxisBit) {

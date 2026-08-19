@@ -16,7 +16,7 @@ uart1:
   mode: 8N1
 
 uart_channel1:
-  report_interval_ms: 75
+  report_interval_ms: 50
   uart_num: 1
 
 stepping:

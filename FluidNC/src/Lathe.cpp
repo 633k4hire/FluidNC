@@ -355,6 +355,8 @@ namespace Lathe {
         _last_index_pulse_count.store(0, std::memory_order_relaxed);
         _last_index_pulses.store(0, std::memory_order_relaxed);
         _signed_position.store(0, std::memory_order_relaxed);
+        _last_index_signed_position.store(0, std::memory_order_relaxed);
+        _last_index_us.store(0, std::memory_order_relaxed);
         _measured_direction.store(0, std::memory_order_relaxed);
         _commanded_rpm.store(0, std::memory_order_relaxed);
         _timing_trace_head.store(0, std::memory_order_relaxed);
@@ -380,9 +382,6 @@ namespace Lathe {
         const uint32_t period = timestamp_us - previous;
         if (previous != 0 && period != 0) {
             _raw_period_us.store(period, std::memory_order_relaxed);
-            const uint32_t filtered = _filtered_period_us.load(std::memory_order_relaxed);
-            _filtered_period_us.store(filtered == 0 ? period : static_cast<uint32_t>((static_cast<uint64_t>(filtered) * 3U + period) / 4U),
-                                      std::memory_order_relaxed);
             record_timing_period(timestamp_us, period);
         }
         _pulse_count.fetch_add(1, std::memory_order_relaxed);
@@ -422,6 +421,11 @@ namespace Lathe {
         slot.min_period_us = _timing_window_min_period_us;
         slot.max_period_us = _timing_window_max_period_us;
         slot.period_sum_us = _timing_window_period_sum_us;
+        if (_timing_window_period_count != 0 && _timing_window_period_sum_us != 0) {
+            _filtered_period_us.store(
+                static_cast<uint32_t>(_timing_window_period_sum_us / _timing_window_period_count),
+                std::memory_order_relaxed);
+        }
         slot.sequence.store(sequence, std::memory_order_release);
         _timing_trace_head.store(sequence, std::memory_order_release);
         _timing_window_period_count = 0;
@@ -443,13 +447,15 @@ namespace Lathe {
     }
 
     void LATHE_IRAM_ATTR EncoderSpindleFeedback::record_index(uint32_t timestamp_us) {
-        (void)timestamp_us;
         _snapshot_generation.fetch_add(1, std::memory_order_acq_rel);
         const uint32_t pulses = _pulse_count.load(std::memory_order_relaxed);
+        const int32_t signed_position = _signed_position.load(std::memory_order_relaxed);
         const uint32_t previous = _last_index_pulse_count.exchange(pulses, std::memory_order_relaxed);
         if (_index_pulse_count.load(std::memory_order_relaxed) != 0) {
             _last_index_pulses.store(pulses - previous, std::memory_order_relaxed);
         }
+        _last_index_signed_position.store(signed_position, std::memory_order_relaxed);
+        _last_index_us.store(timestamp_us, std::memory_order_relaxed);
         _index_pulse_count.fetch_add(1, std::memory_order_relaxed);
         _snapshot_generation.fetch_add(1, std::memory_order_release);
     }
@@ -474,6 +480,8 @@ namespace Lathe {
         uint32_t index_count = 0;
         uint32_t last_index_pulses = 0;
         int32_t signed_position = 0;
+        int32_t last_index_signed_position = 0;
+        uint32_t last_index_us = 0;
         int8_t measured_direction = 0;
         do {
             generation_before = _snapshot_generation.load(std::memory_order_acquire);
@@ -487,6 +495,8 @@ namespace Lathe {
             index_count = _index_pulse_count.load(std::memory_order_relaxed);
             last_index_pulses = _last_index_pulses.load(std::memory_order_relaxed);
             signed_position = _signed_position.load(std::memory_order_relaxed);
+            last_index_signed_position = _last_index_signed_position.load(std::memory_order_relaxed);
+            last_index_us = _last_index_us.load(std::memory_order_relaxed);
             measured_direction = _measured_direction.load(std::memory_order_relaxed);
             generation_after = _snapshot_generation.load(std::memory_order_acquire);
         } while (generation_before != generation_after || (generation_after & 1U));
@@ -504,17 +514,36 @@ namespace Lathe {
         status.has_direction = measured_direction != 0;
 
         const bool has_pulses = last_pulse_us != 0 && pulse_count > 0;
-        if (has_pulses && filtered_period_us != 0) {
+        uint64_t display_period_sum_us = 0;
+        uint32_t display_period_count = 0;
+        const uint32_t trace_head = status.timing_trace_head;
+        for (uint32_t offset = 0; offset < 5U && offset < trace_head; ++offset) {
+            EncoderTimingWindow sample;
+            if (!timing_trace_sample(trace_head - offset, sample)) break;
+            // Do not carry an old stopped/reversed sample into the live RPM.
+            if (offset != 0 && sample.end_us != 0 &&
+                static_cast<uint32_t>(last_pulse_us - sample.end_us) > 125000U) break;
+            display_period_sum_us += sample.period_sum_us;
+            display_period_count += sample.period_count;
+        }
+        if (has_pulses && display_period_count != 0 && display_period_sum_us != 0) {
+            status.measured_rpm = (60.0f * 1000000.0f * static_cast<float>(display_period_count)) /
+                                  (static_cast<float>(display_period_sum_us) * static_cast<float>(pulses_per_revolution));
+            status.has_measured_rpm = true;
+        } else if (has_pulses && filtered_period_us != 0) {
             status.measured_rpm = (60.0f * 1000000.0f) /
                                   (static_cast<float>(filtered_period_us) * static_cast<float>(pulses_per_revolution));
             status.has_measured_rpm = true;
         }
 
-        const int32_t phase = ((signed_position % static_cast<int32_t>(pulses_per_revolution)) +
+        const bool has_indexed_angle = index_count > 0 && last_index_us != 0;
+        const int32_t phase_origin = has_indexed_angle ? last_index_signed_position : 0;
+        const int32_t phase = (((signed_position - phase_origin) % static_cast<int32_t>(pulses_per_revolution)) +
                                static_cast<int32_t>(pulses_per_revolution)) %
                               static_cast<int32_t>(pulses_per_revolution);
         status.has_index_pulse       = index_count > 0;
         status.has_angular_position  = has_pulses;
+        status.has_indexed_angle     = has_indexed_angle;
         status.revolution_count      = pulse_count / pulses_per_revolution;
         status.angular_position_rev  = static_cast<float>(phase) / static_cast<float>(pulses_per_revolution);
         status.last_pulse_age_ms     = has_pulses ? now_ms - status.timestamp_ms : 0;

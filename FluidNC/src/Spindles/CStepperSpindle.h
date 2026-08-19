@@ -68,6 +68,6 @@ namespace Spindles {
         bool     _lastControlActionFailed = false;
 
         void stopStream(bool immediate);
-        void establishRelativeCZero();
+        void establishStoppedCReference();
     };
 }

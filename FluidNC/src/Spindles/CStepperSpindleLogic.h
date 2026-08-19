@@ -29,4 +29,13 @@ namespace Spindles::CStepperLogic {
         }
         return static_cast<uint32_t>(std::lround(rpm_per_sec * static_cast<float>(steps_per_rev) * 1000.0f / 60.0f));
     }
+
+    inline int32_t indexed_angle_steps(float angular_position_rev, uint32_t steps_per_rev) {
+        if (!std::isfinite(angular_position_rev) || steps_per_rev == 0) {
+            return 0;
+        }
+        const float normalized = angular_position_rev - std::floor(angular_position_rev);
+        const int64_t rounded = static_cast<int64_t>(std::llround(normalized * static_cast<float>(steps_per_rev)));
+        return static_cast<int32_t>(rounded % static_cast<int64_t>(steps_per_rev));
+    }
 }

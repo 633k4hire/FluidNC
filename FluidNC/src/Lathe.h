@@ -212,11 +212,12 @@ namespace Lathe {
         bool         has_measured_rpm : 1;
         bool         has_index_pulse : 1;
         bool         has_angular_position : 1;
+        bool         has_indexed_angle : 1;
         bool         has_direction : 1;
         bool         stale : 1;
         bool         fault : 1;
 
-        FeedbackStatus() : has_measured_rpm(false), has_index_pulse(false), has_angular_position(false), has_direction(false), stale(false), fault(false) {}
+        FeedbackStatus() : has_measured_rpm(false), has_index_pulse(false), has_angular_position(false), has_indexed_angle(false), has_direction(false), stale(false), fault(false) {}
     };
 
     struct EncoderTimingWindow {
@@ -279,6 +280,8 @@ namespace Lathe {
         std::atomic<uint32_t> _last_index_pulse_count { 0 };
         std::atomic<uint32_t> _last_index_pulses { 0 };
         std::atomic<int32_t>  _signed_position { 0 };
+        std::atomic<int32_t>  _last_index_signed_position { 0 };
+        std::atomic<uint32_t> _last_index_us { 0 };
         std::atomic<int8_t>   _measured_direction { 0 };
         std::atomic<SpindleSpeed> _commanded_rpm { 0 };
         std::atomic<uint32_t> _timing_trace_head { 0 };
