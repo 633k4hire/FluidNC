@@ -314,6 +314,15 @@ TEST(LatheScaffold, ContinuousSchedulerMergesOnlyTheDueCAxisBit) {
     EXPECT_EQ(Machine::ContinuousEventScheduler::merged_step_mask(0x03u, 0x20u, true), 0x23u);
 }
 
+TEST(LatheScaffold, ContinuousSchedulerIgnoresPlannerDirectionForOwnedCAxis) {
+    constexpr uint32_t cMask = 0x20u;
+
+    EXPECT_EQ(Machine::ContinuousEventScheduler::preserve_owned_direction(0x00u, 0x20u, cMask, true), 0x20u);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::preserve_owned_direction(0x22u, 0x00u, cMask, true), 0x02u);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::preserve_owned_direction(0x02u, 0x20u, cMask, true), 0x22u);
+    EXPECT_EQ(Machine::ContinuousEventScheduler::preserve_owned_direction(0x22u, 0x00u, cMask, false), 0x22u);
+}
+
 TEST(LatheScaffold, ContinuousSchedulerRetiresOnlyOneActuallyEmittedPulse) {
     EXPECT_FALSE(Machine::ContinuousEventScheduler::pulse_was_emitted(41u, 41u));
     EXPECT_TRUE(Machine::ContinuousEventScheduler::pulse_was_emitted(41u, 42u));

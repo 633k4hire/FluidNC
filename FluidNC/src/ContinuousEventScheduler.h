@@ -177,6 +177,18 @@ namespace Machine::ContinuousEventScheduler {
         return continuous_due ? planner_mask | continuous_mask : planner_mask;
     }
 
+    // The finite planner does not own the continuous axis, so its stale
+    // direction bit must not look like a direction change while spindle mode
+    // owns C. Repeated false changes add physical direction frames to the I2S
+    // stream and stretch every simultaneous X/Z + C interval.
+    CONTINUOUS_SCHEDULER_INLINE uint32_t preserve_owned_direction(uint32_t requested_mask,
+                                                                 uint32_t committed_mask,
+                                                                 uint32_t owned_mask,
+                                                                 bool     owner_active) {
+        return owner_active ? (requested_mask & ~owned_mask) | (committed_mask & owned_mask)
+                            : requested_mask;
+    }
+
     // A due continuous event is complete only when Stepping::step() actually
     // emitted exactly one pulse for the continuously-owned axis. Unsigned
     // subtraction deliberately preserves the check across counter wrap.

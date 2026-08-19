@@ -196,6 +196,8 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
     }
     step_mask = static_cast<AxisMask>(
         ContinuousEventScheduler::merged_step_mask(step_mask, continuous_mask, continuous_due));
+    dir_mask = static_cast<AxisMask>(ContinuousEventScheduler::preserve_owned_direction(
+        dir_mask, _previousDirectionMask, continuous_mask, continuous_owner));
     // Set the direction pins, but optimize for the common
     // situation where the direction bits haven't changed.
     if (_previousDirectionMask == 65535) {
