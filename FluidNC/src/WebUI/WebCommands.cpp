@@ -848,6 +848,9 @@ namespace WebUI {
             j.begin_array("data");
 
             j.id_value_object("Lathe enabled", Lathe::enabled() ? "true" : "false");
+            const auto homed_axes = Machine::Axes::maskToNames(
+                Machine::Axes::homingMask & ~Machine::Homing::unhomed_axes());
+            j.id_value_object("Homed axes", homed_axes.c_str());
             j.id_value_object("Spindle state", spindle->isStopping() ? "STOPPING" : spindle_state_name(spindle->get_state()));
             j.id_value_object("Shared chuck mode", Lathe::shared_chuck_mode_name(Lathe::shared_chuck_mode()));
             j.id_value_object("Spindle drive", spindle->driveType());
