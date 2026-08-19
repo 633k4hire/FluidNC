@@ -120,4 +120,12 @@ namespace Lathe {
     const SpindleFeedback& configured_spindle_feedback() {
         return encoder_enabled() && capture_active ? static_cast<const SpindleFeedback&>(encoder_feedback) : static_cast<const SpindleFeedback&>(null_feedback);
     }
+
+    uint32_t encoder_timing_trace_head() {
+        return encoder_feedback.timing_trace_head();
+    }
+
+    bool encoder_timing_trace_sample(uint32_t sequence, EncoderTimingWindow& sample) {
+        return encoder_feedback.timing_trace_sample(sequence, sample);
+    }
 }

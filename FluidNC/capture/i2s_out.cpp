@@ -12,3 +12,4 @@ void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
         *diagnostics = {};
     }
 }
+uint32_t i2s_out_timeline_frames() { return 0; }

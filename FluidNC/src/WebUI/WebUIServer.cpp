@@ -1001,6 +1001,7 @@ namespace WebUI {
         _webserver->on("/api/v1/settings", HTTP_GET, handleSettingsApi);
         _webserver->on("/api/v1/settings", HTTP_PUT, handleSettingsApi, nullptr, LatheApiBody);
         _webserver->on("/api/v1/diagnostics/controller", HTTP_GET, handleDiagnosticsApi);
+        _webserver->on("/api/v1/diagnostics/encoder-timing", HTTP_GET, handleDiagnosticsApi);
         _webserver->on("/api/v1/diagnostics/m5/grant", HTTP_GET, handleDiagnosticsApi);
         _webserver->on("/api/v1/diagnostics/m5/verify",
                        HTTP_POST,
@@ -1757,6 +1758,12 @@ namespace WebUI {
             url == "/api/v1/diagnostics/controller") {
             cleanup();
             sendJSON(request, 200, LatheDiagnostics::snapshotJson());
+            return;
+        }
+        if (request->method() == HTTP_GET &&
+            url == "/api/v1/diagnostics/encoder-timing") {
+            cleanup();
+            sendJSON(request, 200, LatheDiagnostics::encoderTimingJson());
             return;
         }
 

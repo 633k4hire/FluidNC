@@ -124,6 +124,34 @@ uint32_t          Stepping::_plannerTicksUntilEvent = 0;
 uint32_t          Stepping::_schedulerLastIntervalTicks = 100;
 bool              Stepping::_plannerDeferredForContinuous = false;
 int32_t           Stepping::_plannerDeferredAdjustmentTicks = 0;
+volatile uint32_t Stepping::_continuousFaultReason = 0;
+volatile uint32_t Stepping::_continuousFaultCount = 0;
+volatile uint32_t Stepping::_continuousSchedulerCalls = 0;
+volatile uint32_t Stepping::_continuousPlannerStarts = 0;
+volatile uint32_t Stepping::_continuousPlannerResets = 0;
+volatile uint32_t Stepping::_continuousMergedPulses = 0;
+volatile uint32_t Stepping::_continuousStandalonePulses = 0;
+volatile uint32_t Stepping::_continuousPlannerEndFallbackPulses = 0;
+volatile uint32_t Stepping::_continuousPlannerDelays = 0;
+volatile uint32_t Stepping::_continuousPlannerAdvances = 0;
+volatile uint32_t Stepping::_continuousLastIntervalTicks = 0;
+volatile uint32_t Stepping::_continuousMinIntervalTicks = 0;
+volatile uint32_t Stepping::_continuousMaxIntervalTicks = 0;
+volatile uint32_t Stepping::_continuousLastPhysicalIntervalFrames = 0;
+volatile uint32_t Stepping::_continuousMinPhysicalIntervalFrames = 0;
+volatile uint32_t Stepping::_continuousMaxPhysicalIntervalFrames = 0;
+volatile uint32_t Stepping::_continuousPhysicalIntervalCount = 0;
+volatile uint32_t Stepping::_continuousLastPulseTimelineFrames = 0;
+volatile bool     Stepping::_continuousHasPulseTimeline = false;
+volatile uint32_t Stepping::_continuousFaultPulseCount = 0;
+volatile uint32_t Stepping::_continuousFaultAppliedRateMillihz = 0;
+volatile uint32_t Stepping::_continuousFaultRateSequence = 0;
+volatile uint32_t Stepping::_continuousFaultSchedulerIntervalTicks = 0;
+volatile uint32_t Stepping::_continuousFaultPlannerPeriodTicks = 0;
+volatile uint32_t Stepping::_continuousFaultPlannerTicksUntilEvent = 0;
+volatile uint32_t Stepping::_continuousFaultTicksUntilStep = 0;
+volatile uint32_t Stepping::_continuousFaultPlannerResetCount = 0;
+volatile uint32_t Stepping::_continuousFaultFlags = 0;
 
 bool* Stepping::limit_var(axis_t axis, motor_t motor) {
     auto m = axis_motors[axis][motor];
@@ -212,7 +240,7 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
         if (bitnum_is_true(step_mask, axis)) {
             if (continuous_owner && axis == continuous_axis) {
                 if (!continuous_due) {
-                    latchContinuousFault();
+                    latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::UnexpectedPlannerC));
                     continue;
                 }
 
@@ -228,8 +256,9 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
                     const auto increment = bitnum_is_true(_previousDirectionMask, axis) ? -1 : 1;
                     axis_steps[axis] += increment;
                     __atomic_add_fetch(&_continuousPulseCounter, 1U, __ATOMIC_RELAXED);
+                    recordContinuousPhysicalPulse();
                 } else {
-                    latchContinuousFault();
+                    latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::COutputUnavailable));
                 }
                 continue;
             }
@@ -263,6 +292,7 @@ void IRAM_ATTR Stepping::unstep() {
 }
 
 void Stepping::resetPlanner() {
+    __atomic_add_fetch(&_continuousPlannerResets, 1U, __ATOMIC_RELAXED);
     __atomic_store_n(&_continuousPlannerStartPending, false, __ATOMIC_RELEASE);
     __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
     _plannerSchedulerActive = false;
@@ -317,7 +347,7 @@ uint32_t Stepping::maxPulsesPerSec() {
 void Stepping::publishContinuousRate(uint32_t rate_millihz, bool ramping) {
     const auto command = ContinuousEventScheduler::make_rate_command(fStepperTimer, rate_millihz, ramping);
     if (!command.valid) {
-        latchContinuousFault();
+        latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::InvalidRateCommand));
         return;
     }
 
@@ -378,11 +408,12 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
     if (!__atomic_load_n(&_continuousSchedulerActive, __ATOMIC_ACQUIRE)) {
         return Stepper::pulse_func();
     }
+    ++_continuousSchedulerCalls;
 
     const uint32_t elapsed_ticks = _schedulerLastIntervalTicks ? _schedulerLastIntervalTicks : 1U;
     bool owner = __atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE);
     if (owner && i2s_out_continuous_transport_faulted()) {
-        latchContinuousFault();
+        latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::TransportFault));
         owner = false;
     }
 
@@ -390,7 +421,7 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
     uint32_t command_sequence = 0;
     if (readContinuousRateCommand(command, command_sequence) && command_sequence != _continuousAppliedSequence) {
         if (!ContinuousEventScheduler::apply_rate(_continuousInterval, command)) {
-            latchContinuousFault();
+            latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::InvalidAppliedRate));
             owner = false;
         } else {
             _continuousAppliedSequence = command_sequence;
@@ -402,6 +433,7 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
     }
 
     if (__atomic_exchange_n(&_continuousPlannerStartPending, false, __ATOMIC_ACQ_REL)) {
+        ++_continuousPlannerStarts;
         _plannerSchedulerActive = true;
         _plannerTicksUntilEvent = 0;
     } else if (_plannerSchedulerActive && !Stepper::is_awake()) {
@@ -431,12 +463,14 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
         merge_guard_ticks);
 
     if (coincidence == ContinuousEventScheduler::CoincidenceAction::DelayPlannerToContinuous) {
+        ++_continuousPlannerDelays;
         const uint32_t delay_ticks = _continuousInterval.ticks_until_step;
         _plannerDeferredForContinuous = true;
         _plannerDeferredAdjustmentTicks = -static_cast<int32_t>(delay_ticks);
         _plannerTicksUntilEvent = delay_ticks;
         planner_due = false;
     } else if (coincidence == ContinuousEventScheduler::CoincidenceAction::AdvancePlannerToContinuous) {
+        ++_continuousPlannerAdvances;
         planner_phase_adjustment = static_cast<int32_t>(_plannerTicksUntilEvent);
         _plannerTicksUntilEvent = 0;
         planner_due = true;
@@ -464,9 +498,15 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
                     ContinuousEventScheduler::MissingDuePulseAction::EmitContinuousOnly &&
                 emitContinuousPulse();
             if (emitted_with_planner || emitted_at_planner_end) {
+                recordContinuousInterval(_continuousInterval.current_period_ticks);
+                if (emitted_with_planner) {
+                    ++_continuousMergedPulses;
+                } else {
+                    ++_continuousPlannerEndFallbackPulses;
+                }
                 ContinuousEventScheduler::retire_step(_continuousInterval);
             } else {
-                latchContinuousFault();
+                latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::MissingMergedPulse));
             }
         }
         _plannerSchedulerActive = planner_continues;
@@ -476,9 +516,11 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
                                       : 0;
     } else if (continuous_due) {
         if (emitContinuousPulse()) {
+            recordContinuousInterval(_continuousInterval.current_period_ticks);
+            ++_continuousStandalonePulses;
             ContinuousEventScheduler::retire_step(_continuousInterval);
         } else {
-            latchContinuousFault();
+            latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::MissingStandalonePulse));
         }
     }
 
@@ -570,6 +612,7 @@ bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz
     __atomic_store_n(&_continuousFaulted, false, __ATOMIC_RELEASE);
     __atomic_store_n(&_continuousFaultPending, false, __ATOMIC_RELEASE);
     __atomic_store_n(&_continuousStoppedAck, false, __ATOMIC_RELEASE);
+    resetContinuousDiagnostics();
     publishContinuousRate(0, true);
 
     if (_previousDirectionMask == 65535) {
@@ -650,9 +693,108 @@ void IRAM_ATTR Stepping::emergencyStop() {
     __atomic_store_n(&_continuousStoppedAck, true, __ATOMIC_RELEASE);
 }
 
-void IRAM_ATTR Stepping::latchContinuousFault() {
+void Stepping::resetContinuousDiagnostics() {
+    __atomic_store_n(&_continuousFaultReason, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultCount, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousSchedulerCalls, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPlannerStarts, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPlannerResets, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousMergedPulses, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousStandalonePulses, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPlannerEndFallbackPulses, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPlannerDelays, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPlannerAdvances, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousLastIntervalTicks, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousMinIntervalTicks, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousMaxIntervalTicks, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousLastPhysicalIntervalFrames, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousMinPhysicalIntervalFrames, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousMaxPhysicalIntervalFrames, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousPhysicalIntervalCount, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousLastPulseTimelineFrames, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousHasPulseTimeline, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultPulseCount, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultAppliedRateMillihz, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultRateSequence, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultSchedulerIntervalTicks, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultPlannerPeriodTicks, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultPlannerTicksUntilEvent, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultTicksUntilStep, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultPlannerResetCount, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&_continuousFaultFlags, 0U, __ATOMIC_RELEASE);
+}
+
+void IRAM_ATTR Stepping::recordContinuousInterval(uint32_t interval_ticks) {
+    _continuousLastIntervalTicks = interval_ticks;
+    const uint32_t minimum = _continuousMinIntervalTicks;
+    if (minimum == 0 || interval_ticks < minimum) {
+        _continuousMinIntervalTicks = interval_ticks;
+    }
+    const uint32_t maximum = _continuousMaxIntervalTicks;
+    if (interval_ticks > maximum) {
+        _continuousMaxIntervalTicks = interval_ticks;
+    }
+}
+
+void IRAM_ATTR Stepping::recordContinuousPhysicalPulse() {
+    const uint32_t timeline = i2s_out_timeline_frames();
+    const bool has_prior = _continuousHasPulseTimeline;
+    const uint32_t prior = _continuousLastPulseTimelineFrames;
+    _continuousLastPulseTimelineFrames = timeline;
+    if (!has_prior) {
+        _continuousHasPulseTimeline = true;
+        return;
+    }
+
+    const uint32_t interval_frames = timeline - prior;
+    _continuousLastPhysicalIntervalFrames = interval_frames;
+    const uint32_t minimum = _continuousMinPhysicalIntervalFrames;
+    if (minimum == 0 || interval_frames < minimum) {
+        _continuousMinPhysicalIntervalFrames = interval_frames;
+    }
+    const uint32_t maximum = _continuousMaxPhysicalIntervalFrames;
+    if (interval_frames > maximum) {
+        _continuousMaxPhysicalIntervalFrames = interval_frames;
+    }
+    ++_continuousPhysicalIntervalCount;
+}
+
+void IRAM_ATTR Stepping::captureContinuousFault(uint32_t reason) {
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(
+            &_continuousFaultReason, &expected, reason, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+
+    const axis_t axis = _continuousAxis;
+    motor_pins_t* motor = axis < MAX_N_AXIS ? axis_motors[axis][0] : nullptr;
+    uint32_t flags = 0;
+    if (__atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE)) flags |= 1U << 0;
+    if (__atomic_load_n(&_continuousSchedulerActive, __ATOMIC_ACQUIRE)) flags |= 1U << 1;
+    if (_plannerSchedulerActive) flags |= 1U << 2;
+    if (_plannerSchedulerActive && _plannerTicksUntilEvent == 0) flags |= 1U << 3;
+    if (_continuousInterval.active && _continuousInterval.ticks_until_step == 0) flags |= 1U << 4;
+    if (Stepper::is_awake()) flags |= 1U << 5;
+    if (motor != nullptr) flags |= 1U << 6;
+    if (motor != nullptr && motor->blocked) flags |= 1U << 7;
+    if (motor != nullptr && motor->limited) flags |= 1U << 8;
+
+    __atomic_store_n(&_continuousFaultPulseCount, __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultAppliedRateMillihz, __atomic_load_n(&_continuousAppliedRateMillihz, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultRateSequence, _continuousAppliedSequence, __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultSchedulerIntervalTicks, _schedulerLastIntervalTicks, __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultPlannerPeriodTicks, _plannerPeriodTicks, __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultPlannerTicksUntilEvent, _plannerTicksUntilEvent, __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultTicksUntilStep, _continuousInterval.ticks_until_step, __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultPlannerResetCount, __atomic_load_n(&_continuousPlannerResets, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+    __atomic_store_n(&_continuousFaultFlags, flags, __ATOMIC_RELEASE);
+}
+
+void IRAM_ATTR Stepping::latchContinuousFault(uint32_t reason) {
     // A shared scheduler fault invalidates both lanes immediately. Foreground
     // CStepper service then raises the machine alarm and resets planner state.
+    __atomic_add_fetch(&_continuousFaultCount, 1U, __ATOMIC_RELAXED);
+    captureContinuousFault(reason);
     emergencyStop();
     __atomic_store_n(&_continuousPlannerStartPending, false, __ATOMIC_RELEASE);
     _plannerSchedulerActive = false;
@@ -666,7 +808,7 @@ void Stepping::serviceContinuous() {
         return;
     }
     if (i2s_out_continuous_transport_faulted()) {
-        latchContinuousFault();
+        latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::TransportFault));
         return;
     }
 
@@ -721,7 +863,62 @@ bool Stepping::takeContinuousFault() {
     const bool scheduler_fault = __atomic_exchange_n(&_continuousFaultPending, false, __ATOMIC_ACQ_REL);
     const bool transport_fault = i2s_out_continuous_transport_take_fault();
     if (transport_fault) {
+        captureContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::TransportFault));
         __atomic_store_n(&_continuousFaulted, true, __ATOMIC_RELEASE);
     }
     return scheduler_fault || transport_fault;
+}
+
+Stepping::ContinuousDiagnostics Stepping::continuousDiagnostics() {
+    ContinuousDiagnostics result;
+    result.faultReason = static_cast<ContinuousFaultReason>(__atomic_load_n(&_continuousFaultReason, __ATOMIC_ACQUIRE));
+    result.faultCount = __atomic_load_n(&_continuousFaultCount, __ATOMIC_ACQUIRE);
+    result.schedulerCalls = __atomic_load_n(&_continuousSchedulerCalls, __ATOMIC_ACQUIRE);
+    result.plannerStarts = __atomic_load_n(&_continuousPlannerStarts, __ATOMIC_ACQUIRE);
+    result.plannerResets = __atomic_load_n(&_continuousPlannerResets, __ATOMIC_ACQUIRE);
+    result.mergedPulses = __atomic_load_n(&_continuousMergedPulses, __ATOMIC_ACQUIRE);
+    result.standalonePulses = __atomic_load_n(&_continuousStandalonePulses, __ATOMIC_ACQUIRE);
+    result.plannerEndFallbackPulses = __atomic_load_n(&_continuousPlannerEndFallbackPulses, __ATOMIC_ACQUIRE);
+    result.plannerDelays = __atomic_load_n(&_continuousPlannerDelays, __ATOMIC_ACQUIRE);
+    result.plannerAdvances = __atomic_load_n(&_continuousPlannerAdvances, __ATOMIC_ACQUIRE);
+    result.lastIntervalTicks = __atomic_load_n(&_continuousLastIntervalTicks, __ATOMIC_ACQUIRE);
+    result.minIntervalTicks = __atomic_load_n(&_continuousMinIntervalTicks, __ATOMIC_ACQUIRE);
+    result.maxIntervalTicks = __atomic_load_n(&_continuousMaxIntervalTicks, __ATOMIC_ACQUIRE);
+    result.lastPhysicalIntervalFrames = __atomic_load_n(&_continuousLastPhysicalIntervalFrames, __ATOMIC_ACQUIRE);
+    result.minPhysicalIntervalFrames = __atomic_load_n(&_continuousMinPhysicalIntervalFrames, __ATOMIC_ACQUIRE);
+    result.maxPhysicalIntervalFrames = __atomic_load_n(&_continuousMaxPhysicalIntervalFrames, __ATOMIC_ACQUIRE);
+    result.physicalIntervalCount = __atomic_load_n(&_continuousPhysicalIntervalCount, __ATOMIC_ACQUIRE);
+    result.faultPulseCount = __atomic_load_n(&_continuousFaultPulseCount, __ATOMIC_ACQUIRE);
+    result.faultAppliedRateMillihz = __atomic_load_n(&_continuousFaultAppliedRateMillihz, __ATOMIC_ACQUIRE);
+    result.faultRateSequence = __atomic_load_n(&_continuousFaultRateSequence, __ATOMIC_ACQUIRE);
+    result.faultSchedulerIntervalTicks = __atomic_load_n(&_continuousFaultSchedulerIntervalTicks, __ATOMIC_ACQUIRE);
+    result.faultPlannerPeriodTicks = __atomic_load_n(&_continuousFaultPlannerPeriodTicks, __ATOMIC_ACQUIRE);
+    result.faultPlannerTicksUntilEvent = __atomic_load_n(&_continuousFaultPlannerTicksUntilEvent, __ATOMIC_ACQUIRE);
+    result.faultTicksUntilStep = __atomic_load_n(&_continuousFaultTicksUntilStep, __ATOMIC_ACQUIRE);
+    result.faultPlannerResetCount = __atomic_load_n(&_continuousFaultPlannerResetCount, __ATOMIC_ACQUIRE);
+    const uint32_t flags = __atomic_load_n(&_continuousFaultFlags, __ATOMIC_ACQUIRE);
+    result.faultOwner = (flags & (1U << 0)) != 0;
+    result.faultSchedulerActive = (flags & (1U << 1)) != 0;
+    result.faultPlannerActive = (flags & (1U << 2)) != 0;
+    result.faultPlannerDue = (flags & (1U << 3)) != 0;
+    result.faultContinuousDue = (flags & (1U << 4)) != 0;
+    result.faultStepperAwake = (flags & (1U << 5)) != 0;
+    result.faultMotorPresent = (flags & (1U << 6)) != 0;
+    result.faultMotorBlocked = (flags & (1U << 7)) != 0;
+    result.faultMotorLimited = (flags & (1U << 8)) != 0;
+    return result;
+}
+
+const char* Stepping::continuousFaultReasonName(ContinuousFaultReason reason) {
+    switch (reason) {
+        case ContinuousFaultReason::None: return "none";
+        case ContinuousFaultReason::UnexpectedPlannerC: return "unexpected_planner_c";
+        case ContinuousFaultReason::COutputUnavailable: return "c_output_unavailable";
+        case ContinuousFaultReason::InvalidRateCommand: return "invalid_rate_command";
+        case ContinuousFaultReason::TransportFault: return "transport_fault";
+        case ContinuousFaultReason::InvalidAppliedRate: return "invalid_applied_rate";
+        case ContinuousFaultReason::MissingMergedPulse: return "missing_merged_pulse";
+        case ContinuousFaultReason::MissingStandalonePulse: return "missing_standalone_pulse";
+    }
+    return "unknown";
 }

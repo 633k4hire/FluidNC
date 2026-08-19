@@ -173,6 +173,7 @@ void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
         *diagnostics = (i2s_out_diagnostics_t){ 0 };
     }
 }
+uint32_t i2s_out_timeline_frames() { return 0; }
 
 void IRAM_ATTR i2s_out_delay() {}
 

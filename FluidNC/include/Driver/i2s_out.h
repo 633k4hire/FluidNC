@@ -98,6 +98,10 @@ typedef struct {
 
 void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics);
 
+// Monotonic I2S-frame timeline sampled by the shared C/planner scheduler.
+// This is an IRAM-safe diagnostic read; it does not affect transport timing.
+uint32_t i2s_out_timeline_frames();
+
 /*
    Reference: "ESP32 Technical Reference Manual" by Espressif Systems
      https://www.espressif.com/sites/default/files/documentation/esp32_technical_reference_manual_en.pdf

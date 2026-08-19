@@ -348,6 +348,7 @@ namespace Lathe {
         _pulses_per_revolution.store(std::max<uint32_t>(pulses_per_revolution, 1), std::memory_order_relaxed);
         _stale_timeout_ms.store(std::max<uint32_t>(stale_timeout_ms, 1), std::memory_order_relaxed);
         _last_pulse_us.store(0, std::memory_order_relaxed);
+        _raw_period_us.store(0, std::memory_order_relaxed);
         _filtered_period_us.store(0, std::memory_order_relaxed);
         _pulse_count.store(0, std::memory_order_relaxed);
         _index_pulse_count.store(0, std::memory_order_relaxed);
@@ -356,6 +357,16 @@ namespace Lathe {
         _signed_position.store(0, std::memory_order_relaxed);
         _measured_direction.store(0, std::memory_order_relaxed);
         _commanded_rpm.store(0, std::memory_order_relaxed);
+        _timing_trace_head.store(0, std::memory_order_relaxed);
+        for (auto& slot : _timing_trace) {
+            slot.sequence.store(0, std::memory_order_relaxed);
+        }
+        _timing_window_start_us = 0;
+        _timing_window_end_us = 0;
+        _timing_window_period_count = 0;
+        _timing_window_min_period_us = 0;
+        _timing_window_max_period_us = 0;
+        _timing_window_period_sum_us = 0;
         _snapshot_generation.fetch_add(1, std::memory_order_release);
     }
 
@@ -368,9 +379,11 @@ namespace Lathe {
         const uint32_t previous = _last_pulse_us.exchange(timestamp_us, std::memory_order_relaxed);
         const uint32_t period = timestamp_us - previous;
         if (previous != 0 && period != 0) {
+            _raw_period_us.store(period, std::memory_order_relaxed);
             const uint32_t filtered = _filtered_period_us.load(std::memory_order_relaxed);
             _filtered_period_us.store(filtered == 0 ? period : static_cast<uint32_t>((static_cast<uint64_t>(filtered) * 3U + period) / 4U),
                                       std::memory_order_relaxed);
+            record_timing_period(timestamp_us, period);
         }
         _pulse_count.fetch_add(1, std::memory_order_relaxed);
         if (direction != 0) {
@@ -379,6 +392,54 @@ namespace Lathe {
             _signed_position.fetch_add(normalized, std::memory_order_relaxed);
         }
         _snapshot_generation.fetch_add(1, std::memory_order_release);
+    }
+
+    void LATHE_IRAM_ATTR EncoderSpindleFeedback::record_timing_period(uint32_t timestamp_us, uint32_t period_us) {
+        if (_timing_window_period_count != 0 && timestamp_us - _timing_window_start_us >= TimingTraceWindowUs) {
+            retire_timing_window();
+        }
+        if (_timing_window_period_count == 0) {
+            _timing_window_start_us = timestamp_us - period_us;
+            _timing_window_min_period_us = period_us;
+            _timing_window_max_period_us = period_us;
+            _timing_window_period_sum_us = 0;
+        } else {
+            if (period_us < _timing_window_min_period_us) _timing_window_min_period_us = period_us;
+            if (period_us > _timing_window_max_period_us) _timing_window_max_period_us = period_us;
+        }
+        _timing_window_end_us = timestamp_us;
+        ++_timing_window_period_count;
+        _timing_window_period_sum_us += period_us;
+    }
+
+    void LATHE_IRAM_ATTR EncoderSpindleFeedback::retire_timing_window() {
+        const uint32_t sequence = _timing_trace_head.load(std::memory_order_relaxed) + 1U;
+        EncoderTimingSlot& slot = _timing_trace[(sequence - 1U) % TimingTraceWindowCount];
+        slot.sequence.store(0, std::memory_order_release);
+        slot.start_us = _timing_window_start_us;
+        slot.end_us = _timing_window_end_us;
+        slot.period_count = _timing_window_period_count;
+        slot.min_period_us = _timing_window_min_period_us;
+        slot.max_period_us = _timing_window_max_period_us;
+        slot.period_sum_us = _timing_window_period_sum_us;
+        slot.sequence.store(sequence, std::memory_order_release);
+        _timing_trace_head.store(sequence, std::memory_order_release);
+        _timing_window_period_count = 0;
+    }
+
+    bool EncoderSpindleFeedback::timing_trace_sample(uint32_t sequence, EncoderTimingWindow& sample) const {
+        if (sequence == 0) return false;
+        const EncoderTimingSlot& slot = _timing_trace[(sequence - 1U) % TimingTraceWindowCount];
+        const uint32_t before = slot.sequence.load(std::memory_order_acquire);
+        if (before != sequence) return false;
+        sample.sequence = before;
+        sample.start_us = slot.start_us;
+        sample.end_us = slot.end_us;
+        sample.period_count = slot.period_count;
+        sample.min_period_us = slot.min_period_us;
+        sample.max_period_us = slot.max_period_us;
+        sample.period_sum_us = slot.period_sum_us;
+        return slot.sequence.load(std::memory_order_acquire) == before;
     }
 
     void LATHE_IRAM_ATTR EncoderSpindleFeedback::record_index(uint32_t timestamp_us) {
@@ -408,6 +469,7 @@ namespace Lathe {
         uint32_t stale_timeout_ms = 1;
         uint32_t last_pulse_us = 0;
         uint32_t filtered_period_us = 0;
+        uint32_t raw_period_us = 0;
         uint32_t pulse_count = 0;
         uint32_t index_count = 0;
         uint32_t last_index_pulses = 0;
@@ -420,6 +482,7 @@ namespace Lathe {
             stale_timeout_ms = _stale_timeout_ms.load(std::memory_order_relaxed);
             last_pulse_us = _last_pulse_us.load(std::memory_order_relaxed);
             filtered_period_us = _filtered_period_us.load(std::memory_order_relaxed);
+            raw_period_us = _raw_period_us.load(std::memory_order_relaxed);
             pulse_count = _pulse_count.load(std::memory_order_relaxed);
             index_count = _index_pulse_count.load(std::memory_order_relaxed);
             last_index_pulses = _last_index_pulses.load(std::memory_order_relaxed);
@@ -434,6 +497,9 @@ namespace Lathe {
         status.pulse_count = pulse_count;
         status.index_count = index_count;
         status.last_index_pulses = last_index_pulses;
+        status.raw_period_us = raw_period_us;
+        status.filtered_period_us = filtered_period_us;
+        status.timing_trace_head = _timing_trace_head.load(std::memory_order_acquire);
         status.measured_direction = measured_direction;
         status.has_direction = measured_direction != 0;
 

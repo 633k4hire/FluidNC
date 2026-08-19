@@ -335,6 +335,7 @@ static volatile uint32_t _diag_underruns                 = 0;
 static volatile uint32_t _diag_max_isr_gap_cycles        = 0;
 static volatile uint32_t _diag_max_isr_duration_cycles = 0;
 static volatile uint32_t _diag_last_isr_cycle            = 0;
+static volatile uint32_t _diag_timeline_frames            = 0;
 
 // The I2S ISR is the only writer. Task context reads this snapshot only after
 // the planner reaches Idle, so these diagnostic-only counters need no volatile
@@ -360,6 +361,7 @@ static void IRAM_ATTR set_timer_ticks(uint32_t ticks) {
 
 static uint32_t IRAM_ATTR next_planner_interval_frames(bool callback_active) {
     const uint32_t frames = i2s_fractional_timing_next(&_planner_frame_timing);
+    _diag_timeline_frames += frames;
     if (callback_active) {
         if (!_diag_planner.active) {
             // Retain the completed run until the first active callback of the
@@ -626,4 +628,8 @@ void i2s_out_get_diagnostics(i2s_out_diagnostics_t* diagnostics) {
     diagnostics->planner_emitted_intervals        = _diag_planner.emitted_intervals;
     diagnostics->planner_active                   = _diag_planner.active;
     diagnostics->transport_faulted                = _continuous_transport_faulted;
+}
+
+uint32_t IRAM_ATTR i2s_out_timeline_frames() {
+    return _diag_timeline_frames;
 }

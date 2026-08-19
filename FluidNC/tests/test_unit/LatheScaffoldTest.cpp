@@ -103,6 +103,27 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     EXPECT_FALSE(Lathe::feedback_supports_threading(stale));
 }
 
+TEST(LatheScaffold, EncoderTimingTraceRetainsHighResolutionWindows) {
+    Lathe::EncoderSpindleFeedback feedback;
+    feedback.configure(1000, 250);
+    for (uint32_t pulse = 0; pulse < 250; ++pulse) {
+        feedback.record_pulse(1000000U + pulse * 100U, 1);
+    }
+
+    const auto status = feedback.status_at(1025);
+    EXPECT_EQ(status.raw_period_us, 100U);
+    EXPECT_EQ(status.filtered_period_us, 100U);
+    EXPECT_GE(status.timing_trace_head, 1U);
+
+    Lathe::EncoderTimingWindow sample;
+    ASSERT_TRUE(feedback.timing_trace_sample(status.timing_trace_head, sample));
+    EXPECT_GT(sample.period_count, 0U);
+    EXPECT_EQ(sample.min_period_us, 100U);
+    EXPECT_EQ(sample.max_period_us, 100U);
+    EXPECT_EQ(sample.period_sum_us, sample.period_count * 100U);
+    EXPECT_EQ(sample.end_us - sample.start_us, sample.period_sum_us);
+}
+
 TEST(LatheScaffold, QuadratureFeedbackTracksReverseMotionWithoutIndex) {
     Lathe::EncoderSpindleFeedback feedback;
     feedback.configure(100, 250);

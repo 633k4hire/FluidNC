@@ -11,4 +11,6 @@ namespace Lathe {
     bool encoder_capture_active();
     void set_encoder_commanded_rpm(SpindleSpeed rpm);
     const SpindleFeedback& configured_spindle_feedback();
+    uint32_t encoder_timing_trace_head();
+    bool encoder_timing_trace_sample(uint32_t sequence, EncoderTimingWindow& sample);
 }

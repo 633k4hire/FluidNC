@@ -205,6 +205,9 @@ namespace Lathe {
         uint32_t     revolution_count = 0;
         uint32_t     last_index_pulses = 0;
         uint32_t     last_pulse_age_ms = 0;
+        uint32_t     raw_period_us = 0;
+        uint32_t     filtered_period_us = 0;
+        uint32_t     timing_trace_head = 0;
         int8_t       measured_direction = 0;
         bool         has_measured_rpm : 1;
         bool         has_index_pulse : 1;
@@ -214,6 +217,16 @@ namespace Lathe {
         bool         fault : 1;
 
         FeedbackStatus() : has_measured_rpm(false), has_index_pulse(false), has_angular_position(false), has_direction(false), stale(false), fault(false) {}
+    };
+
+    struct EncoderTimingWindow {
+        uint32_t sequence = 0;
+        uint32_t start_us = 0;
+        uint32_t end_us = 0;
+        uint32_t period_count = 0;
+        uint32_t min_period_us = 0;
+        uint32_t max_period_us = 0;
+        uint32_t period_sum_us = 0;
     };
 
     class SpindleFeedback {
@@ -235,12 +248,31 @@ namespace Lathe {
         FeedbackStatus status_at(uint32_t now_ms) const;
         bool synchronize_for_threading_start() const override;
         uint32_t pulses_per_revolution() const { return _pulses_per_revolution.load(std::memory_order_relaxed); }
+        uint32_t timing_trace_head() const { return _timing_trace_head.load(std::memory_order_acquire); }
+        bool timing_trace_sample(uint32_t sequence, EncoderTimingWindow& sample) const;
 
     private:
+        static constexpr uint32_t TimingTraceWindowUs = 20000U;
+        static constexpr size_t TimingTraceWindowCount = 128;
+
+        struct EncoderTimingSlot {
+            std::atomic<uint32_t> sequence { 0 };
+            uint32_t start_us = 0;
+            uint32_t end_us = 0;
+            uint32_t period_count = 0;
+            uint32_t min_period_us = 0;
+            uint32_t max_period_us = 0;
+            uint32_t period_sum_us = 0;
+        };
+
+        void LATHE_IRAM_ATTR record_timing_period(uint32_t timestamp_us, uint32_t period_us);
+        void LATHE_IRAM_ATTR retire_timing_window();
+
         std::atomic<uint32_t> _snapshot_generation { 0 };
         std::atomic<uint32_t> _pulses_per_revolution { 1 };
         std::atomic<uint32_t> _stale_timeout_ms { 250 };
         std::atomic<uint32_t> _last_pulse_us { 0 };
+        std::atomic<uint32_t> _raw_period_us { 0 };
         std::atomic<uint32_t> _filtered_period_us { 0 };
         std::atomic<uint32_t> _pulse_count { 0 };
         std::atomic<uint32_t> _index_pulse_count { 0 };
@@ -249,6 +281,14 @@ namespace Lathe {
         std::atomic<int32_t>  _signed_position { 0 };
         std::atomic<int8_t>   _measured_direction { 0 };
         std::atomic<SpindleSpeed> _commanded_rpm { 0 };
+        std::atomic<uint32_t> _timing_trace_head { 0 };
+        std::array<EncoderTimingSlot, TimingTraceWindowCount> _timing_trace {};
+        uint32_t _timing_window_start_us = 0;
+        uint32_t _timing_window_end_us = 0;
+        uint32_t _timing_window_period_count = 0;
+        uint32_t _timing_window_min_period_us = 0;
+        uint32_t _timing_window_max_period_us = 0;
+        uint32_t _timing_window_period_sum_us = 0;
     };
 
     bool enabled();

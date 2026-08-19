@@ -15,4 +15,5 @@ namespace LatheDiagnostics {
     // diagnostics API. Recent events are fixed-size and never contain settings
     // values or network credentials.
     std::string snapshotJson();
+    std::string encoderTimingJson();
 }

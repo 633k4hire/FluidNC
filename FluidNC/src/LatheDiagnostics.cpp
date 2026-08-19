@@ -4,6 +4,7 @@
 #include "Machine/MachineConfig.h"
 #include "Driver/i2s_out.h"
 #include "Lathe.h"
+#include "LatheEncoder.h"
 #include "Planner.h"
 #include "State.h"
 #include "Stepper.h"
@@ -187,10 +188,12 @@ namespace LatheDiagnostics {
         i2s_out_diagnostics_t i2s = {};
         i2s_out_get_diagnostics(&i2s);
         const axis_t cAxis = Lathe::c_axis();
+        const auto continuous = Machine::Stepping::continuousDiagnostics();
+        const auto encoder = Lathe::configured_spindle_feedback().status();
 
         std::string json;
         json.reserve(4096);
-        json += "{\"schema_version\":1,\"device\":\"dlc32\",\"uptime_ms\":";
+        json += "{\"schema_version\":2,\"device\":\"dlc32\",\"uptime_ms\":";
         json += std::to_string(millis());
         json += ",\"reset_reason\":";
         json += std::to_string(static_cast<int>(esp_reset_reason()));
@@ -250,6 +253,111 @@ namespace LatheDiagnostics {
         json += std::to_string(Machine::Stepping::continuousPulseCount());
         json += ",\"continuous_faulted\":";
         json += Machine::Stepping::continuousFaulted() ? "true" : "false";
+        json += ",\"fault_reason\":\"";
+        json += Machine::Stepping::continuousFaultReasonName(continuous.faultReason);
+        json += "\",\"fault_count\":";
+        json += std::to_string(continuous.faultCount);
+        json += ",\"scheduler_calls\":";
+        json += std::to_string(continuous.schedulerCalls);
+        json += ",\"planner_starts\":";
+        json += std::to_string(continuous.plannerStarts);
+        json += ",\"planner_resets\":";
+        json += std::to_string(continuous.plannerResets);
+        json += ",\"merged_pulses\":";
+        json += std::to_string(continuous.mergedPulses);
+        json += ",\"standalone_pulses\":";
+        json += std::to_string(continuous.standalonePulses);
+        json += ",\"planner_end_fallback_pulses\":";
+        json += std::to_string(continuous.plannerEndFallbackPulses);
+        json += ",\"planner_delays\":";
+        json += std::to_string(continuous.plannerDelays);
+        json += ",\"planner_advances\":";
+        json += std::to_string(continuous.plannerAdvances);
+        json += ",\"last_interval_ticks\":";
+        json += std::to_string(continuous.lastIntervalTicks);
+        json += ",\"min_interval_ticks\":";
+        json += std::to_string(continuous.minIntervalTicks);
+        json += ",\"max_interval_ticks\":";
+        json += std::to_string(continuous.maxIntervalTicks);
+        json += ",\"last_physical_interval_frames\":";
+        json += std::to_string(continuous.lastPhysicalIntervalFrames);
+        json += ",\"min_physical_interval_frames\":";
+        json += std::to_string(continuous.minPhysicalIntervalFrames);
+        json += ",\"max_physical_interval_frames\":";
+        json += std::to_string(continuous.maxPhysicalIntervalFrames);
+        json += ",\"physical_interval_count\":";
+        json += std::to_string(continuous.physicalIntervalCount);
+        json += ",\"fault_snapshot\":{\"pulse_count\":";
+        json += std::to_string(continuous.faultPulseCount);
+        json += ",\"applied_rate_millihz\":";
+        json += std::to_string(continuous.faultAppliedRateMillihz);
+        json += ",\"rate_sequence\":";
+        json += std::to_string(continuous.faultRateSequence);
+        json += ",\"scheduler_interval_ticks\":";
+        json += std::to_string(continuous.faultSchedulerIntervalTicks);
+        json += ",\"planner_period_ticks\":";
+        json += std::to_string(continuous.faultPlannerPeriodTicks);
+        json += ",\"planner_ticks_until_event\":";
+        json += std::to_string(continuous.faultPlannerTicksUntilEvent);
+        json += ",\"continuous_ticks_until_step\":";
+        json += std::to_string(continuous.faultTicksUntilStep);
+        json += ",\"planner_reset_count\":";
+        json += std::to_string(continuous.faultPlannerResetCount);
+        json += ",\"owner\":";
+        json += continuous.faultOwner ? "true" : "false";
+        json += ",\"scheduler_active\":";
+        json += continuous.faultSchedulerActive ? "true" : "false";
+        json += ",\"planner_active\":";
+        json += continuous.faultPlannerActive ? "true" : "false";
+        json += ",\"planner_due\":";
+        json += continuous.faultPlannerDue ? "true" : "false";
+        json += ",\"continuous_due\":";
+        json += continuous.faultContinuousDue ? "true" : "false";
+        json += ",\"stepper_awake\":";
+        json += continuous.faultStepperAwake ? "true" : "false";
+        json += ",\"motor_present\":";
+        json += continuous.faultMotorPresent ? "true" : "false";
+        json += ",\"motor_blocked\":";
+        json += continuous.faultMotorBlocked ? "true" : "false";
+        json += ",\"motor_limited\":";
+        json += continuous.faultMotorLimited ? "true" : "false";
+        json += "},\"encoder\":{\"enabled\":";
+        json += Lathe::encoder_enabled() ? "true" : "false";
+        json += ",\"capture_active\":";
+        json += Lathe::encoder_capture_active() ? "true" : "false";
+        json += ",\"pulses_per_revolution\":";
+        json += std::to_string(Lathe::encoder_pulses_per_revolution());
+        json += ",\"commanded_rpm\":";
+        json += std::to_string(encoder.commanded_rpm);
+        json += ",\"measured_rpm\":";
+        if (encoder.has_measured_rpm) appendFixed6(json, encoder.measured_rpm);
+        else json += "null";
+        json += ",\"pulse_count\":";
+        json += std::to_string(encoder.pulse_count);
+        json += ",\"index_count\":";
+        json += std::to_string(encoder.index_count);
+        json += ",\"revolution_count\":";
+        json += std::to_string(encoder.revolution_count);
+        json += ",\"last_index_pulses\":";
+        json += std::to_string(encoder.last_index_pulses);
+        json += ",\"last_pulse_age_ms\":";
+        json += std::to_string(encoder.last_pulse_age_ms);
+        json += ",\"raw_period_us\":";
+        json += std::to_string(encoder.raw_period_us);
+        json += ",\"filtered_period_us\":";
+        json += std::to_string(encoder.filtered_period_us);
+        json += ",\"timing_trace_head\":";
+        json += std::to_string(encoder.timing_trace_head);
+        json += ",\"direction\":";
+        json += std::to_string(encoder.measured_direction);
+        json += ",\"angular_position_rev\":";
+        if (encoder.has_angular_position) appendFixed6(json, encoder.angular_position_rev);
+        else json += "null";
+        json += ",\"stale\":";
+        json += encoder.stale ? "true" : "false";
+        json += ",\"fault\":";
+        json += encoder.fault ? "true" : "false";
+        json += "}";
         json += "},\"input\":{\"line_count\":";
         json += std::to_string(lineCount);
         json += ",\"jog_count\":";
@@ -284,6 +392,55 @@ namespace LatheDiagnostics {
                     escape(event.source) + "\",\"detail\":\"" +
                     escape(event.detail) + "\",\"result\":" +
                     std::to_string(event.result) + "}";
+        }
+        json += "]}";
+        return json;
+    }
+
+    std::string encoderTimingJson() {
+        constexpr uint32_t WindowCount = 128;
+        const uint32_t ppr = Lathe::encoder_pulses_per_revolution();
+        const uint32_t head = Lathe::encoder_timing_trace_head();
+        const uint32_t first = head > WindowCount ? head - WindowCount + 1U : 1U;
+
+        std::string json;
+        json.reserve(16384);
+        json += "{\"schema_version\":1,\"kind\":\"encoder-timing\",\"pulses_per_revolution\":";
+        json += std::to_string(ppr);
+        json += ",\"window_us\":20000,\"head_sequence\":";
+        json += std::to_string(head);
+        json += ",\"samples\":[";
+
+        uint32_t emitted = 0;
+        for (uint32_t sequence = first; sequence != 0 && sequence <= head; ++sequence) {
+            Lathe::EncoderTimingWindow sample;
+            if (!Lathe::encoder_timing_trace_sample(sequence, sample)) continue;
+            if (emitted++) json += ',';
+            json += "{\"sequence\":";
+            json += std::to_string(sample.sequence);
+            json += ",\"start_us\":";
+            json += std::to_string(sample.start_us);
+            json += ",\"end_us\":";
+            json += std::to_string(sample.end_us);
+            json += ",\"duration_us\":";
+            json += std::to_string(sample.end_us - sample.start_us);
+            json += ",\"period_count\":";
+            json += std::to_string(sample.period_count);
+            json += ",\"min_period_us\":";
+            json += std::to_string(sample.min_period_us);
+            json += ",\"max_period_us\":";
+            json += std::to_string(sample.max_period_us);
+            json += ",\"period_sum_us\":";
+            json += std::to_string(sample.period_sum_us);
+            json += ",\"rpm\":";
+            if (sample.period_sum_us != 0 && ppr != 0) {
+                appendFixed6(json,
+                             (60.0 * 1000000.0 * static_cast<double>(sample.period_count)) /
+                                 (static_cast<double>(sample.period_sum_us) * static_cast<double>(ppr)));
+            } else {
+                json += "null";
+            }
+            json += '}';
         }
         json += "]}";
         return json;

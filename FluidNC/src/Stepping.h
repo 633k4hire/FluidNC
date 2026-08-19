@@ -73,17 +73,98 @@ namespace Machine {
         static bool                                  _plannerDeferredForContinuous;
         static int32_t                               _plannerDeferredAdjustmentTicks;
 
+        static volatile uint32_t _continuousFaultReason;
+        static volatile uint32_t _continuousFaultCount;
+        static volatile uint32_t _continuousSchedulerCalls;
+        static volatile uint32_t _continuousPlannerStarts;
+        static volatile uint32_t _continuousPlannerResets;
+        static volatile uint32_t _continuousMergedPulses;
+        static volatile uint32_t _continuousStandalonePulses;
+        static volatile uint32_t _continuousPlannerEndFallbackPulses;
+        static volatile uint32_t _continuousPlannerDelays;
+        static volatile uint32_t _continuousPlannerAdvances;
+        static volatile uint32_t _continuousLastIntervalTicks;
+        static volatile uint32_t _continuousMinIntervalTicks;
+        static volatile uint32_t _continuousMaxIntervalTicks;
+        static volatile uint32_t _continuousLastPhysicalIntervalFrames;
+        static volatile uint32_t _continuousMinPhysicalIntervalFrames;
+        static volatile uint32_t _continuousMaxPhysicalIntervalFrames;
+        static volatile uint32_t _continuousPhysicalIntervalCount;
+        static volatile uint32_t _continuousLastPulseTimelineFrames;
+        static volatile bool     _continuousHasPulseTimeline;
+        static volatile uint32_t _continuousFaultPulseCount;
+        static volatile uint32_t _continuousFaultAppliedRateMillihz;
+        static volatile uint32_t _continuousFaultRateSequence;
+        static volatile uint32_t _continuousFaultSchedulerIntervalTicks;
+        static volatile uint32_t _continuousFaultPlannerPeriodTicks;
+        static volatile uint32_t _continuousFaultPlannerTicksUntilEvent;
+        static volatile uint32_t _continuousFaultTicksUntilStep;
+        static volatile uint32_t _continuousFaultPlannerResetCount;
+        static volatile uint32_t _continuousFaultFlags;
+
         static bool     continuousSchedulerPulse();
         static bool     emitContinuousPulse();
         static void     publishContinuousRate(uint32_t rate_millihz, bool ramping);
         static bool     readContinuousRateCommand(ContinuousEventScheduler::RateCommand& command, uint32_t& sequence);
         static void     finishContinuousStop();
-        static void     latchContinuousFault();
+        static void     resetContinuousDiagnostics();
+        static void     recordContinuousInterval(uint32_t interval_ticks);
+        static void     recordContinuousPhysicalPulse();
+        static void     captureContinuousFault(uint32_t reason);
+        static void     latchContinuousFault(uint32_t reason);
         static uint32_t plannerPeakPulsesPerSecond(axis_t excluded_axis);
 
         static step_engine_t* step_engine;
 
     public:
+        enum class ContinuousFaultReason : uint32_t {
+            None = 0,
+            UnexpectedPlannerC,
+            COutputUnavailable,
+            InvalidRateCommand,
+            TransportFault,
+            InvalidAppliedRate,
+            MissingMergedPulse,
+            MissingStandalonePulse,
+        };
+
+        struct ContinuousDiagnostics {
+            ContinuousFaultReason faultReason = ContinuousFaultReason::None;
+            uint32_t faultCount = 0;
+            uint32_t schedulerCalls = 0;
+            uint32_t plannerStarts = 0;
+            uint32_t plannerResets = 0;
+            uint32_t mergedPulses = 0;
+            uint32_t standalonePulses = 0;
+            uint32_t plannerEndFallbackPulses = 0;
+            uint32_t plannerDelays = 0;
+            uint32_t plannerAdvances = 0;
+            uint32_t lastIntervalTicks = 0;
+            uint32_t minIntervalTicks = 0;
+            uint32_t maxIntervalTicks = 0;
+            uint32_t lastPhysicalIntervalFrames = 0;
+            uint32_t minPhysicalIntervalFrames = 0;
+            uint32_t maxPhysicalIntervalFrames = 0;
+            uint32_t physicalIntervalCount = 0;
+            uint32_t faultPulseCount = 0;
+            uint32_t faultAppliedRateMillihz = 0;
+            uint32_t faultRateSequence = 0;
+            uint32_t faultSchedulerIntervalTicks = 0;
+            uint32_t faultPlannerPeriodTicks = 0;
+            uint32_t faultPlannerTicksUntilEvent = 0;
+            uint32_t faultTicksUntilStep = 0;
+            uint32_t faultPlannerResetCount = 0;
+            bool faultOwner = false;
+            bool faultSchedulerActive = false;
+            bool faultPlannerActive = false;
+            bool faultPlannerDue = false;
+            bool faultContinuousDue = false;
+            bool faultStepperAwake = false;
+            bool faultMotorPresent = false;
+            bool faultMotorBlocked = false;
+            bool faultMotorLimited = false;
+        };
+
         enum stepper_id_t {
             TIMED = 0,
             RMT_ENGINE,
@@ -150,6 +231,8 @@ namespace Machine {
         static uint32_t continuousPulseCount();
         static bool continuousFaulted();
         static bool takeContinuousFault();
+        static ContinuousDiagnostics continuousDiagnostics();
+        static const char* continuousFaultReasonName(ContinuousFaultReason reason);
 
         static AxisMask direction_mask;
 
