@@ -19,6 +19,8 @@
 #include "Job.h"                  // Job::active() and Job::channel()
 
 #include "Machine/MachineConfig.h"
+#include "Stepping.h"
+#include "ThreadingStepScheduler.h"
 #include "Parameters.h"
 #include "Flowcontrol.h"
 
@@ -299,6 +301,7 @@ Error gc_execute_line(const char* input_line) {
     bool isWaitOnInputDigital = false;
     bool sharedChuckCAxisMotion = false;
     bool sharedChuckRequiresSync = false;
+    uint32_t threadingCommandedCRateMillihz = 0;
 
     auto    n_axis = Axes::_numberAxis;
     float   coord_data[MAX_N_AXIS];  // Used by WCO-related commands
@@ -445,6 +448,8 @@ Error gc_execute_line(const char* input_line) {
                         mg_word_bit           = ModalGroup::MG1;
                         break;
                     case 32:
+                        log_info("G32 is disabled in Phase 5");
+                        return Error::GcodeUnsupportedCommand;
                     case 33:
                         if (mantissa != 0) {
                             return Error::GcodeUnsupportedCommand;
@@ -467,16 +472,15 @@ Error gc_execute_line(const char* input_line) {
                         if (mantissa != 0) {
                             return Error::GcodeUnsupportedCommand;
                         }
+                        if (int_value == 76) {
+                            log_info("G76 is disabled until G33 Index safety is complete");
+                            return Error::GcodeUnsupportedCommand;
+                        }
                         if (!Lathe::enabled()) {
                             log_info("Lathe canned cycles require lathe mode to be enabled");
                             return Error::GcodeUnsupportedCommand;
                         }
-                        if (int_value == 76) {
-                            if (auto err = Lathe::validate_feature(Lathe::Feature::Threading); err != Error::Ok) {
-                                return err;
-                            }
-                            gc_block.modal.motion = Motion::LatheThreadingCycle;
-                        } else if (int_value == 70) {
+                        if (int_value == 70) {
                             gc_block.modal.motion = Motion::LatheFinishingCycle;
                         } else if (int_value == 71) {
                             gc_block.modal.motion = Motion::LatheRoughingCycle;
@@ -1521,21 +1525,55 @@ Error gc_execute_line(const char* input_line) {
                     if (!axis_words) {
                         return Error::GcodeNoAxisWords;
                     }
-                    if (!bitnum_is_true(axis_words, Lathe::z_axis())) {
-                        log_info("Lathe threading requires Z-axis motion for phase-synchronized pitch control");
+                    if (axis_words != bitnum_to_mask(Lathe::z_axis())) {
+                        log_info("G33 Phase 5 supports one straight Z endpoint");
                         return Error::GcodeUnsupportedCommand;
                     }
                     if (gc_block.modal.feed_rate != FeedRate::UnitsPerRev) {
-                        log_info("Lathe threading requires G95 feed-per-revolution mode");
+                        log_info("G33 requires G95");
                         return Error::GcodeUnsupportedCommand;
                     }
                     if (gc_block.modal.spindle == SpindleState::Disable) {
-                        log_info("Lathe threading requires an active spindle");
+                        log_info("G33 requires an active spindle");
                         return Error::GcodeUnsupportedCommand;
                     }
-                    if (!Lathe::feedback_supports_threading(spindle->latheFeedback().status())) {
-                        log_info("Lathe threading requires measured RPM, index pulse, and angular position feedback");
+                    threadingCommandedCRateMillihz = Machine::Stepping::continuousRateMillihz();
+                    if (!Machine::Stepping::continuousActive() ||
+                        threadingCommandedCRateMillihz == 0 ||
+                        threadingCommandedCRateMillihz != Machine::Stepping::continuousTargetRateMillihz()) {
+                        log_info("G33 requires settled continuous C");
                         return Error::GcodeUnsupportedCommand;
+                    }
+                    {
+                        auto z_axis = config->_axes->_axis[Lathe::z_axis()];
+                        const float pitch_mm = gc_block.modal.units == Units::Inches
+                                                   ? gc_block.values.f * MM_PER_INCH
+                                                   : gc_block.values.f;
+                        const auto command = Machine::ThreadingStepScheduler::make_command(
+                            pitch_mm,
+                            z_axis ? z_axis->_stepsPerMm : 0.0f,
+                            spindle->stepsPerRevolution());
+                        if (!command.valid) {
+                            log_info("G33 pitch is outside the Phase 5 envelope");
+                            return Error::GcodeValueWordInvalid;
+                        }
+                        const int32_t start_z_steps = static_cast<int32_t>(std::lround(
+                            gc_state.position[Lathe::z_axis()] * z_axis->_stepsPerMm));
+                        const int32_t target_z_steps = static_cast<int32_t>(std::lround(
+                            gc_block.values.xyz[Lathe::z_axis()] * z_axis->_stepsPerMm));
+                        if (start_z_steps == target_z_steps) {
+                            log_info("G33 endpoint is below one Z step");
+                            return Error::GcodeValueWordInvalid;
+                        }
+                        if (!Machine::ThreadingStepScheduler::rate_admissible(
+                                command,
+                                threadingCommandedCRateMillihz,
+                                z_axis->_stepsPerMm,
+                                z_axis->_maxRate,
+                                z_axis->_acceleration)) {
+                            log_info("G33 exceeds the Z start envelope");
+                            return Error::GcodeValueWordInvalid;
+                        }
                     }
                     break;
                 case Motion::CwArc:
@@ -2159,23 +2197,24 @@ Error gc_execute_line(const char* input_line) {
         pl_data->lathe_css.max_rpm            = Lathe::max_css_rpm();
     }
     if (gc_state.modal.motion == Motion::Threading) {
-        const auto threading_feedback = spindle->latheFeedback().status();
-        if (!Lathe::feedback_supports_threading(threading_feedback)) {
-            send_alarm(ExecAlarm::LatheSync);
-            return Error::GcodeUnsupportedCommand;
+        auto z_axis = config->_axes->_axis[Lathe::z_axis()];
+        const float pitch_mm = gc_state.modal.units == Units::Inches
+                                   ? gc_state.feed_rate * MM_PER_INCH
+                                   : gc_state.feed_rate;
+        const auto command = Machine::ThreadingStepScheduler::make_command(
+            pitch_mm,
+            z_axis ? z_axis->_stepsPerMm : 0.0f,
+            spindle->stepsPerRevolution());
+        if (!command.valid || !Machine::Stepping::continuousActive()) {
+            return Error::GcodeValueWordInvalid;
         }
-        if (!spindle->latheFeedback().synchronize_for_threading_start()) {
-            send_alarm(ExecAlarm::LatheSync);
-            return Error::GcodeUnsupportedCommand;
-        }
-        pl_data->lathe_threading.enabled      = 1;
-        pl_data->lathe_threading.synchronized = 0;
-        pl_data->lathe_threading.pitch_mm     = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
-        pl_data->lathe_threading.start_rpm    = threading_feedback.measured_rpm;
-        pl_data->lathe_threading.start_z_mm   = gc_state.position[Lathe::z_axis()];
-        pl_data->lathe_threading.target_z_mm  = gc_block.values.xyz[Lathe::z_axis()];
-        pl_data->lathe_threading.start_spindle_revolutions = 0.0f;
-        pl_data->lathe_threading.sync_index_count = 0;
+        pl_data->lathe_threading.enabled                  = 1;
+        pl_data->lathe_threading.c_steps_per_revolution   = command.c_steps_per_revolution;
+        pl_data->lathe_threading.z_steps_per_revolution   = command.z_steps_per_revolution;
+        pl_data->lathe_threading.commanded_c_rate_millihz = threadingCommandedCRateMillihz;
+        const float commanded_rpm = static_cast<float>(threadingCommandedCRateMillihz) * 60.0f /
+                                    (static_cast<float>(command.c_steps_per_revolution) * 1000.0f);
+        pl_data->feed_rate = commanded_rpm * pitch_mm;
         pl_data->motion.noFeedOverride        = 1;
     }
     if (gc_state.modal.motion != Motion::None) {
@@ -2246,18 +2285,7 @@ Error gc_execute_line(const char* input_line) {
                     if (cycle_plan.moves[move_index].kind == Lathe::CycleMoveKind::Rapid) {
                         cycle_pl_data.motion.rapidMotion = 1;
                     } else if (cycle_plan.moves[move_index].kind == Lathe::CycleMoveKind::Threading) {
-                        const auto threading_feedback = spindle->latheFeedback().status();
-                        if (!Lathe::feedback_supports_threading(threading_feedback) || !spindle->latheFeedback().synchronize_for_threading_start()) {
-                            send_alarm(ExecAlarm::LatheSync);
-                            return Error::GcodeUnsupportedCommand;
-                        }
-                        cycle_pl_data.motion.noFeedOverride = 1;
-                        cycle_pl_data.lathe_threading.enabled = 1;
-                        cycle_pl_data.lathe_threading.synchronized = 0;
-                        cycle_pl_data.lathe_threading.pitch_mm = gc_state.modal.units == Units::Inches ? gc_state.feed_rate * MM_PER_INCH : gc_state.feed_rate;
-                        cycle_pl_data.lathe_threading.start_rpm = threading_feedback.measured_rpm;
-                        cycle_pl_data.lathe_threading.start_z_mm = cycle_position[Lathe::z_axis()];
-                        cycle_pl_data.lathe_threading.target_z_mm = cycle_target[Lathe::z_axis()];
+                        return Error::GcodeUnsupportedCommand;
                     }
                     if (!mc_linear(cycle_target, &cycle_pl_data, cycle_position)) {
                         return Error::GcodeValueWordInvalid;

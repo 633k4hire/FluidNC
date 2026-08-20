@@ -2,6 +2,7 @@
 #include "../src/LatheEncoder.h"
 #include "../src/ContinuousStepperLogic.h"
 #include "../src/ContinuousEventScheduler.h"
+#include "../src/ThreadingStepScheduler.h"
 #include "../src/Spindles/CStepperSpindleLogic.h"
 
 #include <gtest/gtest.h>
@@ -82,10 +83,13 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     feedback.configure(100, 250);
     feedback.set_commanded_rpm(600);
     feedback.record_index(1000000);
-    feedback.record_pulse(1001000, 1);
-    feedback.record_pulse(1002000, 1);
+    // Live RPM is intentionally derived from retired high-resolution timing
+    // windows. Supply enough edges to retire the first 20 ms window.
+    for (uint32_t pulse = 1; pulse <= 22; ++pulse) {
+        feedback.record_pulse(1000000 + pulse * 1000, 1);
+    }
 
-    auto status = feedback.status_at(1002);
+    auto status = feedback.status_at(1022);
     EXPECT_TRUE(status.has_measured_rpm);
     EXPECT_TRUE(status.has_index_pulse);
     EXPECT_TRUE(status.has_angular_position);
@@ -95,9 +99,9 @@ TEST(LatheScaffold, EncoderFeedbackComputesRpmPhaseAndStaleState) {
     EXPECT_NEAR(status.measured_rpm, 600.0f, 0.001f);
     EXPECT_TRUE(status.has_direction);
     EXPECT_EQ(status.measured_direction, 1);
-    EXPECT_EQ(status.pulse_count, 2u);
+    EXPECT_EQ(status.pulse_count, 22u);
     EXPECT_EQ(status.index_count, 1u);
-    EXPECT_NEAR(status.angular_position_rev, 0.02f, 0.001f);
+    EXPECT_NEAR(status.angular_position_rev, 0.22f, 0.001f);
     EXPECT_TRUE(Lathe::feedback_supports_threading(status));
 
     auto stale = feedback.status_at(2000);
@@ -146,18 +150,18 @@ TEST(LatheScaffold, QuadratureFeedbackTracksReverseMotionWithoutIndex) {
 TEST(LatheScaffold, IndexIsObservedButDoesNotGateOrFaultQuadratureFeedback) {
     Lathe::EncoderSpindleFeedback feedback;
     feedback.configure(4, 250);
-    for (uint32_t pulse = 0; pulse < 10; ++pulse) {
-        feedback.record_pulse(1000000 + pulse * 1000, 1);
+    for (uint32_t pulse = 0; pulse < 6; ++pulse) {
+        feedback.record_pulse(1000000 + pulse * 5000, 1);
     }
 
-    auto withoutIndex = feedback.status_at(1009);
+    auto withoutIndex = feedback.status_at(1025);
     EXPECT_TRUE(withoutIndex.has_measured_rpm);
     EXPECT_TRUE(withoutIndex.has_angular_position);
     EXPECT_FALSE(withoutIndex.has_index_pulse);
     EXPECT_FALSE(withoutIndex.fault);
 
-    feedback.record_index(1010000);
-    auto withIndex = feedback.status_at(1010);
+    feedback.record_index(1030000);
+    auto withIndex = feedback.status_at(1030);
     EXPECT_TRUE(withIndex.has_index_pulse);
     EXPECT_EQ(withIndex.index_count, 1u);
     EXPECT_FALSE(withIndex.fault);
@@ -743,4 +747,105 @@ TEST(LatheScaffold, SynchronizedThreadingTrajectoryFollowsSpindleRevolutions) {
     EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 0.0f), 0.0f);
     EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 2.0f), -3.0f);
     EXPECT_FLOAT_EQ(Lathe::synchronized_thread_z(state, 100.0f), -10.0f);
+}
+
+TEST(LatheScaffold, CommandedThreadingArmsOnlyOnNextSyntheticCRevolution) {
+    const auto command = Machine::ThreadingStepScheduler::make_command(1.0f, 640.0f, 1600U);
+    ASSERT_TRUE(command.valid);
+
+    Machine::ThreadingStepScheduler::State state;
+    ASSERT_TRUE(Machine::ThreadingStepScheduler::arm(state, command, 225U));
+    EXPECT_EQ(state.start_c_pulse, 1600U);
+    EXPECT_TRUE(Machine::ThreadingStepScheduler::active(state));
+
+    for (uint32_t pulse = 226U; pulse < 1600U; ++pulse) {
+        EXPECT_FALSE(Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, pulse - 1U));
+        EXPECT_FALSE(Machine::ThreadingStepScheduler::retire_c_pulse(state, pulse));
+    }
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, 1599U));
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::retire_c_pulse(state, 1600U));
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, 1600U));
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::retire_c_pulse(state, 1601U));
+    EXPECT_TRUE(Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, 1601U));
+    EXPECT_TRUE(Machine::ThreadingStepScheduler::retire_c_pulse(state, 1602U));
+}
+
+TEST(LatheScaffold, CommandedThreadingProducesExactTenRevolutionMetricPitch) {
+    const auto command = Machine::ThreadingStepScheduler::make_command(1.25f, 640.0f, 1600U);
+    ASSERT_TRUE(command.valid);
+    EXPECT_EQ(command.z_steps_per_revolution, 800U);
+
+    Machine::ThreadingStepScheduler::State state;
+    ASSERT_TRUE(Machine::ThreadingStepScheduler::arm(state, command, 0U));
+    uint32_t due_count = 0;
+    for (uint32_t pulse = 1; pulse <= 17600U; ++pulse) {
+        const bool due = Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, pulse - 1U);
+        const bool retired = Machine::ThreadingStepScheduler::retire_c_pulse(state, pulse);
+        EXPECT_EQ(retired, due);
+        due_count += retired ? 1U : 0U;
+    }
+
+    // The first 1600 pulses reach the future start boundary. The following ten
+    // complete revolutions produce exactly 10 * 1.25 mm * 640 steps/mm.
+    EXPECT_EQ(due_count, 8000U);
+}
+
+TEST(LatheScaffold, CommandedThreadingQuantizesRepresentativeInchPitchWithinOneZStep) {
+    constexpr float pitchMm = 0.05f * 25.4f;
+    const auto command = Machine::ThreadingStepScheduler::make_command(pitchMm, 640.0f, 1600U);
+    ASSERT_TRUE(command.valid);
+    EXPECT_EQ(command.z_steps_per_revolution, 813U);
+    const float quantizedPitch = static_cast<float>(command.z_steps_per_revolution) / 640.0f;
+    EXPECT_LE(std::fabs(quantizedPitch - pitchMm), 1.0f / 640.0f);
+}
+
+TEST(LatheScaffold, CommandedThreadingRejectsMoreThanOneZStepPerCStep) {
+    const auto command = Machine::ThreadingStepScheduler::make_command(3.0f, 640.0f, 1600U);
+    EXPECT_FALSE(command.valid);
+}
+
+TEST(LatheScaffold, CommandedThreadingRateAdmissionUsesConfiguredZLimit) {
+    const auto command = Machine::ThreadingStepScheduler::make_command(1.0f, 640.0f, 1600U);
+    ASSERT_TRUE(command.valid);
+    const uint32_t rateAt50Rpm = 1333333U;
+    const auto conservativePitch = Machine::ThreadingStepScheduler::make_command(0.1f, 640.0f, 1600U);
+    ASSERT_TRUE(conservativePitch.valid);
+    EXPECT_TRUE(Machine::ThreadingStepScheduler::rate_admissible(
+        conservativePitch, rateAt50Rpm, 640.0f, 600.0f, 25.0f));
+
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::rate_admissible(
+        command, rateAt50Rpm, 640.0f, 600.0f, 25.0f));
+
+    const auto widePitch = Machine::ThreadingStepScheduler::make_command(2.0f, 640.0f, 1600U);
+    ASSERT_TRUE(widePitch.valid);
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::rate_admissible(
+        widePitch, 11200000U, 640.0f, 600.0f, 25.0f));
+}
+
+TEST(LatheScaffold, CommandedThreadingConsecutiveBlocksRearmAtAFreshBoundary) {
+    const auto firstCommand = Machine::ThreadingStepScheduler::make_command(0.5f, 640.0f, 1600U);
+    const auto secondCommand = Machine::ThreadingStepScheduler::make_command(1.0f, 640.0f, 1600U);
+    ASSERT_TRUE(firstCommand.valid);
+    ASSERT_TRUE(secondCommand.valid);
+
+    Machine::ThreadingStepScheduler::State state;
+    ASSERT_TRUE(Machine::ThreadingStepScheduler::arm(state, firstCommand, 225U));
+    EXPECT_EQ(state.start_c_pulse, 1600U);
+
+    Machine::ThreadingStepScheduler::reset(state);
+    ASSERT_TRUE(Machine::ThreadingStepScheduler::arm(state, secondCommand, 1700U));
+    EXPECT_EQ(state.start_c_pulse, 3200U);
+    EXPECT_EQ(state.accumulator, 0U);
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, 3199U));
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::retire_c_pulse(state, 3200U));
+}
+
+TEST(LatheScaffold, CommandedThreadingInvalidationIsExplicitAndNonResumable) {
+    const auto command = Machine::ThreadingStepScheduler::make_command(1.0f, 640.0f, 1600U);
+    Machine::ThreadingStepScheduler::State state;
+    ASSERT_TRUE(Machine::ThreadingStepScheduler::arm(state, command, 0U));
+    Machine::ThreadingStepScheduler::invalidate(state);
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::active(state));
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::z_due_on_next_c_pulse(state, 1599U));
+    EXPECT_FALSE(Machine::ThreadingStepScheduler::retire_c_pulse(state, 1600U));
 }

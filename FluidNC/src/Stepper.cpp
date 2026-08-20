@@ -35,6 +35,10 @@ struct st_block_t {
     uint32_t step_event_count;
     AxisMask direction_bits;
     bool     is_pwm_rate_adjusted;  // Tracks motions that require constant laser power/rate
+    bool     lathe_threading;
+    uint32_t threading_c_steps_per_revolution;
+    uint32_t threading_z_steps_per_revolution;
+    uint32_t threading_commanded_c_rate_millihz;
 };
 static volatile st_block_t* st_block_buffer = nullptr;
 
@@ -300,6 +304,17 @@ bool Stepper::is_awake() {
     return awake;
 }
 
+bool IRAM_ATTR Stepper::threading_execution(ThreadingExecution& execution) {
+    if (!awake || st.exec_block == nullptr || !st.exec_block->lathe_threading) {
+        return false;
+    }
+    execution.c_steps_per_revolution   = st.exec_block->threading_c_steps_per_revolution;
+    execution.z_steps_per_revolution   = st.exec_block->threading_z_steps_per_revolution;
+    execution.commanded_c_rate_millihz = st.exec_block->threading_commanded_c_rate_millihz;
+    execution.block_token              = st.exec_block_index;
+    return true;
+}
+
 static void reset_stepper_state(bool preserve_continuous) {
     if (preserve_continuous) {
         Stepping::resetPlanner();
@@ -441,6 +456,10 @@ void Stepper::prep_buffer() {
                 // segment buffer finishes the prepped block, but the stepper ISR is still executing it.
                 st_prep_block                 = &st_block_buffer[prep.st_block_index];
                 st_prep_block->direction_bits = pl_block->direction_bits;
+                st_prep_block->lathe_threading = pl_block->lathe_threading.enabled;
+                st_prep_block->threading_c_steps_per_revolution = pl_block->lathe_threading.c_steps_per_revolution;
+                st_prep_block->threading_z_steps_per_revolution = pl_block->lathe_threading.z_steps_per_revolution;
+                st_prep_block->threading_commanded_c_rate_millihz = pl_block->lathe_threading.commanded_c_rate_millihz;
                 auto n_axis                   = Axes::_numberAxis;
 
                 // Bit-shift multiply all Bresenham data by the max AMASS level so that
@@ -591,58 +610,11 @@ void Stepper::prep_buffer() {
         float speed_var;                                            // Speed worker variable
         float mm_remaining = pl_block->millimeters;                 // New segment distance from end of block.
         float minimum_mm   = mm_remaining - prep.req_mm_increment;  // Guarantee at least one step.
-        bool  lathe_threading_segment = false;
-
         if (minimum_mm < 0.0) {
             minimum_mm = 0.0;
         }
 
-        if (pl_block->lathe_threading.enabled) {
-            if (sys.step_control.executeHold) {
-                send_alarm(ExecAlarm::LatheSync);
-                sys.step_control.endMotion = true;
-                return;
-            }
-
-            const auto feedback = spindle->latheFeedback().status();
-            if (!Lathe::feedback_supports_threading(feedback)) {
-                send_alarm(ExecAlarm::LatheSync);
-                sys.step_control.endMotion = true;
-                return;
-            }
-
-            if (!pl_block->lathe_threading.synchronized) {
-                if (pl_block->lathe_threading.sync_index_count == 0) {
-                    pl_block->lathe_threading.sync_index_count = feedback.revolution_count + 1;
-                }
-                if (feedback.revolution_count < pl_block->lathe_threading.sync_index_count) {
-                    return;
-                }
-                pl_block->lathe_threading.start_spindle_revolutions = Lathe::spindle_revolutions(feedback);
-                pl_block->lathe_threading.synchronized = 1;
-            }
-
-            Lathe::ThreadingSyncState sync_state;
-            sync_state.start_z_mm = pl_block->lathe_threading.start_z_mm;
-            sync_state.end_z_mm   = pl_block->lathe_threading.target_z_mm;
-            sync_state.pitch_mm   = pl_block->lathe_threading.pitch_mm;
-            sync_state.start_spindle_revolutions = pl_block->lathe_threading.start_spindle_revolutions;
-
-            const float progress = Lathe::synchronized_thread_progress(sync_state, Lathe::spindle_revolutions(feedback));
-            const float target_mm_remaining = std::max(0.0f, pl_block->lathe_threading.path_length_mm * (1.0f - progress));
-            if (target_mm_remaining >= pl_block->millimeters) {
-                return;
-            }
-
-            mm_remaining = target_mm_remaining;
-            const float segment_mm = pl_block->millimeters - mm_remaining;
-            const float synchronized_feed = std::max(feedback.measured_rpm * pl_block->lathe_threading.pitch_mm, 1.0f);
-            dt = segment_mm / synchronized_feed;
-            prep.current_speed = synchronized_feed;
-            lathe_threading_segment = true;
-        }
-
-        if (!lathe_threading_segment) do {
+        do {
             switch (prep.ramp_type) {
                 case RAMP_DECEL_OVERRIDE:
                     speed_var = pl_block->acceleration * time_var;
@@ -729,11 +701,6 @@ void Stepper::prep_buffer() {
         if (st_prep_block->is_pwm_rate_adjusted || sys.step_control.updateSpindleSpeed) {
             if (pl_block->spindle != SpindleState::Disable) {
                 float speed = pl_block->spindle_speed;
-                if (pl_block->lathe_threading.enabled) {
-                    if (!Lathe::feedback_supports_threading(spindle->latheFeedback().status())) {
-                        send_alarm(ExecAlarm::LatheSync);
-                    }
-                }
                 if (pl_block->lathe_css.enabled) {
                     const float completed = pl_block->millimeters > 0.0f ? (pl_block->millimeters - mm_remaining) / pl_block->millimeters : 1.0f;
                     const float diameter = pl_block->lathe_css.start_diameter_mm +
@@ -807,11 +774,18 @@ void Stepper::prep_buffer() {
         uint8_t  level;
 
         // Compute step timing and multi-axis smoothing level.
-        for (level = 0; level < maxAmassLevel; level++) {
-            if (timerTicks < amassThreshold) {
-                break;
+        if (st_prep_block->lathe_threading) {
+            // The commanded C pulse is the Phase 5 threading timebase. One
+            // planner callback must therefore correspond to exactly one real
+            // Z step rather than an AMASS sub-event.
+            level = 0;
+        } else {
+            for (level = 0; level < maxAmassLevel; level++) {
+                if (timerTicks < amassThreshold) {
+                    break;
+                }
+                timerTicks >>= 1;
             }
-            timerTicks >>= 1;
         }
         prep_segment->amass_level = level;
         prep_segment->n_step <<= level;

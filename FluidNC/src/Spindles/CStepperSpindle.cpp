@@ -60,6 +60,11 @@ namespace Spindles {
 
     bool CStepper::canSetState(SpindleState state, float rpm, const char*& reason) const {
         reason = nullptr;
+        if (Machine::Stepping::threadingPassActive() && state != SpindleState::Disable &&
+            (state != _current_state || std::fabs(rpm - _commandedRpm) > 0.0001f)) {
+            reason = "G33 freezes C rate and direction";
+            return false;
+        }
         if (state == SpindleState::Cw || state == SpindleState::Ccw) {
             if (rpm == 0.0f) {
                 return true;
@@ -145,6 +150,10 @@ namespace Spindles {
     }
 
     void CStepper::stopStream(bool immediate) {
+        if (Machine::Stepping::threadingPassActive()) {
+            Machine::Stepping::invalidateThreading();
+            protocol_do_motion_cancel();
+        }
         if (_stopping) {
             if (immediate) {
                 Machine::Stepping::stopContinuous(true);

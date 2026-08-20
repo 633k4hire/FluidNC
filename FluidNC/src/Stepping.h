@@ -6,6 +6,7 @@
 
 #include "Configuration/Configurable.h"
 #include "ContinuousEventScheduler.h"
+#include "ThreadingStepScheduler.h"
 #include "Driver/step_engine.h"
 #include "System.h"
 
@@ -72,6 +73,11 @@ namespace Machine {
         static uint32_t                              _schedulerLastIntervalTicks;
         static bool                                  _plannerDeferredForContinuous;
         static int32_t                               _plannerDeferredAdjustmentTicks;
+        static ThreadingStepScheduler::State          _threadingState;
+        static uint32_t                               _threadingBlockToken;
+        static volatile bool                          _threadingPassActive;
+        static volatile bool                          _threadingInvalidated;
+        static volatile bool                          _threadingInvalidatedPending;
 
         static volatile uint32_t _continuousFaultReason;
         static volatile uint32_t _continuousFaultCount;
@@ -126,6 +132,10 @@ namespace Machine {
             InvalidAppliedRate,
             MissingMergedPulse,
             MissingStandalonePulse,
+            InvalidThreadingCommand,
+            ThreadingRateChanged,
+            ThreadingDecisionMismatch,
+            ThreadingLostContinuousC,
         };
 
         struct ContinuousDiagnostics {
@@ -229,6 +239,9 @@ namespace Machine {
         static uint32_t continuousRateMillihz();
         static uint32_t continuousTargetRateMillihz();
         static uint32_t continuousPulseCount();
+        static bool threadingPassActive();
+        static void IRAM_ATTR invalidateThreading();
+        static bool takeThreadingInvalidated();
         static bool continuousFaulted();
         static bool takeContinuousFault();
         static ContinuousDiagnostics continuousDiagnostics();

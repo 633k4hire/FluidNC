@@ -14,9 +14,21 @@
 #include <cstdint>
 
 namespace Stepper {
+    struct ThreadingExecution {
+        uint32_t c_steps_per_revolution       = 0;
+        uint32_t z_steps_per_revolution       = 0;
+        uint32_t commanded_c_rate_millihz     = 0;
+        uint32_t block_token                  = 0;
+    };
+
     void init();
 
     bool pulse_func();
+
+    // ISR-safe view of the finite block currently staged for execution. A
+    // Phase 5 threading block is a straight Z-only move whose event cadence is
+    // owned by the commanded continuous-C scheduler.
+    bool threading_execution(ThreadingExecution& execution);
 
     // Enable steppers, but cycle does not start unless called by motion control or realtime command.
     void wake_up();

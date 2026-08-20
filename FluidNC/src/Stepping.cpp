@@ -124,6 +124,11 @@ uint32_t          Stepping::_plannerTicksUntilEvent = 0;
 uint32_t          Stepping::_schedulerLastIntervalTicks = 100;
 bool              Stepping::_plannerDeferredForContinuous = false;
 int32_t           Stepping::_plannerDeferredAdjustmentTicks = 0;
+ThreadingStepScheduler::State Stepping::_threadingState = {};
+uint32_t          Stepping::_threadingBlockToken = std::numeric_limits<uint32_t>::max();
+volatile bool     Stepping::_threadingPassActive = false;
+volatile bool     Stepping::_threadingInvalidated = false;
+volatile bool     Stepping::_threadingInvalidatedPending = false;
 volatile uint32_t Stepping::_continuousFaultReason = 0;
 volatile uint32_t Stepping::_continuousFaultCount = 0;
 volatile uint32_t Stepping::_continuousSchedulerCalls = 0;
@@ -301,6 +306,11 @@ void Stepping::resetPlanner() {
     _plannerTicksUntilEvent = 0;
     _plannerDeferredForContinuous = false;
     _plannerDeferredAdjustmentTicks = 0;
+    ThreadingStepScheduler::reset(_threadingState);
+    _threadingBlockToken = std::numeric_limits<uint32_t>::max();
+    __atomic_store_n(&_threadingPassActive, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_threadingInvalidated, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_threadingInvalidatedPending, false, __ATOMIC_RELEASE);
 }
 
 void Stepping::reset() {
@@ -419,10 +429,17 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
         owner = false;
     }
 
+    Stepper::ThreadingExecution threading_execution;
+    bool threading_block = _plannerSchedulerActive && Stepper::threading_execution(threading_execution);
+
     ContinuousEventScheduler::RateCommand command;
     uint32_t command_sequence = 0;
     if (readContinuousRateCommand(command, command_sequence) && command_sequence != _continuousAppliedSequence) {
-        if (!ContinuousEventScheduler::apply_rate(_continuousInterval, command)) {
+        if (__atomic_load_n(&_threadingPassActive, __ATOMIC_ACQUIRE) && threading_block &&
+            command.rate_millihz != threading_execution.commanded_c_rate_millihz) {
+            latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::ThreadingRateChanged));
+            owner = false;
+        } else if (!ContinuousEventScheduler::apply_rate(_continuousInterval, command)) {
             latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::InvalidAppliedRate));
             owner = false;
         } else {
@@ -445,90 +462,184 @@ bool IRAM_ATTR Stepping::continuousSchedulerPulse() {
         _plannerDeferredAdjustmentTicks = 0;
     }
 
-    if (_plannerSchedulerActive && _plannerTicksUntilEvent != 0) {
+    threading_block = _plannerSchedulerActive && Stepper::threading_execution(threading_execution);
+    const bool threading_invalidated = __atomic_load_n(&_threadingInvalidated, __ATOMIC_ACQUIRE);
+    if (threading_block && ThreadingStepScheduler::active(_threadingState) &&
+        threading_execution.block_token != _threadingBlockToken) {
+        ThreadingStepScheduler::reset(_threadingState);
+        __atomic_store_n(&_threadingPassActive, false, __ATOMIC_RELEASE);
+    }
+    if (threading_block && !threading_invalidated &&
+        !ThreadingStepScheduler::active(_threadingState)) {
+        ThreadingStepScheduler::Command threading_command;
+        threading_command.c_steps_per_revolution = threading_execution.c_steps_per_revolution;
+        threading_command.z_steps_per_revolution = threading_execution.z_steps_per_revolution;
+        threading_command.valid = threading_command.c_steps_per_revolution != 0 &&
+                                  threading_command.z_steps_per_revolution != 0 &&
+                                  threading_command.z_steps_per_revolution <= threading_command.c_steps_per_revolution &&
+                                  _continuousInterval.active &&
+                                  _continuousInterval.command.rate_millihz == threading_execution.commanded_c_rate_millihz;
+        if (!ThreadingStepScheduler::arm(
+                _threadingState, threading_command,
+                __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE))) {
+            latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::InvalidThreadingCommand));
+            owner = false;
+        } else {
+            _threadingBlockToken = threading_execution.block_token;
+            __atomic_store_n(&_threadingPassActive, true, __ATOMIC_RELEASE);
+        }
+    } else if (!threading_block && ThreadingStepScheduler::active(_threadingState)) {
+        ThreadingStepScheduler::reset(_threadingState);
+        _threadingBlockToken = std::numeric_limits<uint32_t>::max();
+        __atomic_store_n(&_threadingPassActive, false, __ATOMIC_RELEASE);
+    }
+
+    const bool synchronized_threading =
+        threading_block && !threading_invalidated && ThreadingStepScheduler::active(_threadingState);
+
+    if (_plannerSchedulerActive && !synchronized_threading && _plannerTicksUntilEvent != 0) {
         ContinuousEventScheduler::elapse(_plannerTicksUntilEvent, elapsed_ticks);
     }
     if (owner && _continuousInterval.active && _continuousInterval.ticks_until_step != 0) {
         ContinuousEventScheduler::elapse(_continuousInterval.ticks_until_step, elapsed_ticks);
     }
 
-    bool planner_due = _plannerSchedulerActive && _plannerTicksUntilEvent == 0;
+    bool planner_due = _plannerSchedulerActive && !synchronized_threading && _plannerTicksUntilEvent == 0;
     const bool continuous_due = owner && _continuousInterval.active &&
                                 _continuousInterval.ticks_until_step == 0;
     int32_t planner_phase_adjustment = 0;
-    const uint32_t merge_guard_ticks = std::max<uint32_t>(1U, _pulseUsecs * ticksPerMicrosecond);
-    const auto coincidence = ContinuousEventScheduler::choose_coincidence(
-        _plannerSchedulerActive,
-        _plannerTicksUntilEvent,
-        owner && _continuousInterval.active,
-        _continuousInterval.ticks_until_step,
-        merge_guard_ticks);
-
-    if (coincidence == ContinuousEventScheduler::CoincidenceAction::DelayPlannerToContinuous) {
-        ++_continuousPlannerDelays;
-        const uint32_t delay_ticks = _continuousInterval.ticks_until_step;
-        _plannerDeferredForContinuous = true;
-        _plannerDeferredAdjustmentTicks = -static_cast<int32_t>(delay_ticks);
-        _plannerTicksUntilEvent = delay_ticks;
-        planner_due = false;
-    } else if (coincidence == ContinuousEventScheduler::CoincidenceAction::AdvancePlannerToContinuous) {
-        ++_continuousPlannerAdvances;
-        planner_phase_adjustment = static_cast<int32_t>(_plannerTicksUntilEvent);
-        _plannerTicksUntilEvent = 0;
-        planner_due = true;
-    }
-    if (planner_due && _plannerDeferredForContinuous) {
-        planner_phase_adjustment = _plannerDeferredAdjustmentTicks;
-        _plannerDeferredForContinuous = false;
-        _plannerDeferredAdjustmentTicks = 0;
-    }
-
-    if (planner_due) {
-        const uint32_t continuous_pulses_before =
-            __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&_continuousPulseDue, continuous_due, __ATOMIC_RELEASE);
-        const bool planner_continues = Stepper::pulse_func();
-        __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
-        if (continuous_due) {
-            const uint32_t continuous_pulses_after =
+    if (synchronized_threading) {
+        if (!owner) {
+            invalidateThreading();
+            latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::ThreadingLostContinuousC));
+        } else if (continuous_due) {
+            const uint32_t continuous_pulses_before =
                 __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
-            const bool emitted_with_planner = ContinuousEventScheduler::pulse_was_emitted(
-                continuous_pulses_before, continuous_pulses_after);
-            const bool emitted_at_planner_end =
-                !emitted_with_planner &&
-                ContinuousEventScheduler::missing_due_pulse_action(planner_continues) ==
-                    ContinuousEventScheduler::MissingDuePulseAction::EmitContinuousOnly &&
-                emitContinuousPulse();
-            if (emitted_with_planner || emitted_at_planner_end) {
-                recordContinuousInterval(_continuousInterval.current_period_ticks);
-                if (emitted_with_planner) {
+            const bool z_due = ThreadingStepScheduler::z_due_on_next_c_pulse(
+                _threadingState, continuous_pulses_before);
+            bool planner_continues = true;
+            bool emitted = false;
+
+            if (z_due) {
+                __atomic_store_n(&_continuousPulseDue, true, __ATOMIC_RELEASE);
+                planner_continues = Stepper::pulse_func();
+                __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
+                emitted = ContinuousEventScheduler::pulse_was_emitted(
+                    continuous_pulses_before,
+                    __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE));
+                if (!emitted && !planner_continues) {
+                    emitted = emitContinuousPulse();
+                    if (emitted) {
+                        ++_continuousPlannerEndFallbackPulses;
+                    }
+                } else if (emitted) {
                     ++_continuousMergedPulses;
-                } else {
-                    ++_continuousPlannerEndFallbackPulses;
                 }
-                ContinuousEventScheduler::retire_step(_continuousInterval);
             } else {
+                emitted = emitContinuousPulse();
+                if (emitted) {
+                    ++_continuousStandalonePulses;
+                }
+            }
+
+            if (!emitted) {
                 latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::MissingMergedPulse));
+            } else {
+                const uint32_t continuous_pulses_after =
+                    __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
+                const bool retired_z = ThreadingStepScheduler::retire_c_pulse(
+                    _threadingState, continuous_pulses_after);
+                if (planner_continues && retired_z != z_due) {
+                    latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::ThreadingDecisionMismatch));
+                }
+                recordContinuousInterval(_continuousInterval.current_period_ticks);
+                ContinuousEventScheduler::retire_step(_continuousInterval);
+            }
+
+            _plannerSchedulerActive = planner_continues;
+            Stepper::ThreadingExecution next_threading_execution;
+            if (!planner_continues || !Stepper::threading_execution(next_threading_execution)) {
+                ThreadingStepScheduler::reset(_threadingState);
+                _threadingBlockToken = std::numeric_limits<uint32_t>::max();
+                __atomic_store_n(&_threadingPassActive, false, __ATOMIC_RELEASE);
+                _plannerTicksUntilEvent = planner_continues ? std::max<uint32_t>(1U, _plannerPeriodTicks) : 0U;
             }
         }
-        _plannerSchedulerActive = planner_continues;
-        _plannerTicksUntilEvent = planner_continues
-                                      ? ContinuousEventScheduler::adjusted_planner_period(
-                                            _plannerPeriodTicks, planner_phase_adjustment)
-                                      : 0;
-    } else if (continuous_due) {
-        if (emitContinuousPulse()) {
-            recordContinuousInterval(_continuousInterval.current_period_ticks);
-            ++_continuousStandalonePulses;
-            ContinuousEventScheduler::retire_step(_continuousInterval);
-        } else {
-            latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::MissingStandalonePulse));
+    } else {
+        const uint32_t merge_guard_ticks = std::max<uint32_t>(1U, _pulseUsecs * ticksPerMicrosecond);
+        const auto coincidence = ContinuousEventScheduler::choose_coincidence(
+            _plannerSchedulerActive,
+            _plannerTicksUntilEvent,
+            owner && _continuousInterval.active,
+            _continuousInterval.ticks_until_step,
+            merge_guard_ticks);
+
+        if (coincidence == ContinuousEventScheduler::CoincidenceAction::DelayPlannerToContinuous) {
+            ++_continuousPlannerDelays;
+            const uint32_t delay_ticks = _continuousInterval.ticks_until_step;
+            _plannerDeferredForContinuous = true;
+            _plannerDeferredAdjustmentTicks = -static_cast<int32_t>(delay_ticks);
+            _plannerTicksUntilEvent = delay_ticks;
+            planner_due = false;
+        } else if (coincidence == ContinuousEventScheduler::CoincidenceAction::AdvancePlannerToContinuous) {
+            ++_continuousPlannerAdvances;
+            planner_phase_adjustment = static_cast<int32_t>(_plannerTicksUntilEvent);
+            _plannerTicksUntilEvent = 0;
+            planner_due = true;
+        }
+        if (planner_due && _plannerDeferredForContinuous) {
+            planner_phase_adjustment = _plannerDeferredAdjustmentTicks;
+            _plannerDeferredForContinuous = false;
+            _plannerDeferredAdjustmentTicks = 0;
+        }
+
+        if (planner_due) {
+            const uint32_t continuous_pulses_before =
+                __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
+            __atomic_store_n(&_continuousPulseDue, continuous_due, __ATOMIC_RELEASE);
+            const bool planner_continues = Stepper::pulse_func();
+            __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
+            if (continuous_due) {
+                const uint32_t continuous_pulses_after =
+                    __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
+                const bool emitted_with_planner = ContinuousEventScheduler::pulse_was_emitted(
+                    continuous_pulses_before, continuous_pulses_after);
+                const bool emitted_at_planner_end =
+                    !emitted_with_planner &&
+                    ContinuousEventScheduler::missing_due_pulse_action(planner_continues) ==
+                        ContinuousEventScheduler::MissingDuePulseAction::EmitContinuousOnly &&
+                    emitContinuousPulse();
+                if (emitted_with_planner || emitted_at_planner_end) {
+                    recordContinuousInterval(_continuousInterval.current_period_ticks);
+                    if (emitted_with_planner) {
+                        ++_continuousMergedPulses;
+                    } else {
+                        ++_continuousPlannerEndFallbackPulses;
+                    }
+                    ContinuousEventScheduler::retire_step(_continuousInterval);
+                } else {
+                    latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::MissingMergedPulse));
+                }
+            }
+            _plannerSchedulerActive = planner_continues;
+            _plannerTicksUntilEvent = planner_continues
+                                          ? ContinuousEventScheduler::adjusted_planner_period(
+                                                _plannerPeriodTicks, planner_phase_adjustment)
+                                          : 0;
+        } else if (continuous_due) {
+            if (emitContinuousPulse()) {
+                recordContinuousInterval(_continuousInterval.current_period_ticks);
+                ++_continuousStandalonePulses;
+                ContinuousEventScheduler::retire_step(_continuousInterval);
+            } else {
+                latchContinuousFault(static_cast<uint32_t>(ContinuousFaultReason::MissingStandalonePulse));
+            }
         }
     }
 
     owner = __atomic_load_n(&_continuousOwner, __ATOMIC_ACQUIRE);
     uint32_t next_ticks = std::numeric_limits<uint32_t>::max();
-    if (_plannerSchedulerActive) {
+    if (_plannerSchedulerActive && !__atomic_load_n(&_threadingPassActive, __ATOMIC_ACQUIRE)) {
         next_ticks = std::max<uint32_t>(1U, _plannerTicksUntilEvent);
     }
     if (owner && _continuousInterval.active) {
@@ -627,6 +738,11 @@ bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz
     _plannerTicksUntilEvent = 0;
     _plannerDeferredForContinuous = false;
     _plannerDeferredAdjustmentTicks = 0;
+    ThreadingStepScheduler::reset(_threadingState);
+    _threadingBlockToken = std::numeric_limits<uint32_t>::max();
+    __atomic_store_n(&_threadingPassActive, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_threadingInvalidated, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&_threadingInvalidatedPending, false, __ATOMIC_RELEASE);
     constexpr uint32_t service_ticks = 20000U;  // 1 ms at the fixed 20 MHz step timer.
     _schedulerLastIntervalTicks = service_ticks;
     __atomic_store_n(&_continuousOwner, true, __ATOMIC_RELEASE);
@@ -636,7 +752,7 @@ bool Stepping::startContinuous(axis_t axis, bool positive, uint32_t rate_millihz
 }
 
 bool Stepping::setContinuousRate(uint32_t rate_millihz) {
-    if (!continuousActive() || rate_millihz == 0 ||
+    if (threadingPassActive() || !continuousActive() || rate_millihz == 0 ||
         !ContinuousEventScheduler::combined_rate_admissible(
             rate_millihz, _continuousPlannerPeakPulsesPerSec, maxPulsesPerSec()) ||
         !ContinuousEventScheduler::make_rate_command(fStepperTimer, rate_millihz).valid) {
@@ -679,6 +795,10 @@ void IRAM_ATTR Stepping::emergencyStop() {
     // deliberately independent of finite planner state so its callers can
     // decide whether X/Z must also be reset (alarm/reset) or kept intact.
     __atomic_store_n(&_continuousOwner, false, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&_threadingPassActive, false, __ATOMIC_ACQ_REL)) {
+        __atomic_store_n(&_threadingInvalidated, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&_threadingInvalidatedPending, true, __ATOMIC_RELEASE);
+    }
     __atomic_store_n(&_continuousPulseDue, false, __ATOMIC_RELEASE);
     i2s_out_continuous_transport_stop();
     _continuousTargetRateMillihz = 0;
@@ -857,6 +977,21 @@ uint32_t Stepping::continuousPulseCount() {
     return __atomic_load_n(&_continuousPulseCounter, __ATOMIC_ACQUIRE);
 }
 
+bool Stepping::threadingPassActive() {
+    return __atomic_load_n(&_threadingPassActive, __ATOMIC_ACQUIRE);
+}
+
+void IRAM_ATTR Stepping::invalidateThreading() {
+    if (__atomic_exchange_n(&_threadingPassActive, false, __ATOMIC_ACQ_REL)) {
+        __atomic_store_n(&_threadingInvalidated, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&_threadingInvalidatedPending, true, __ATOMIC_RELEASE);
+    }
+}
+
+bool Stepping::takeThreadingInvalidated() {
+    return __atomic_exchange_n(&_threadingInvalidatedPending, false, __ATOMIC_ACQ_REL);
+}
+
 bool Stepping::continuousFaulted() {
     return __atomic_load_n(&_continuousFaulted, __ATOMIC_ACQUIRE) || i2s_out_continuous_transport_faulted();
 }
@@ -921,6 +1056,10 @@ const char* Stepping::continuousFaultReasonName(ContinuousFaultReason reason) {
         case ContinuousFaultReason::InvalidAppliedRate: return "invalid_applied_rate";
         case ContinuousFaultReason::MissingMergedPulse: return "missing_merged_pulse";
         case ContinuousFaultReason::MissingStandalonePulse: return "missing_standalone_pulse";
+        case ContinuousFaultReason::InvalidThreadingCommand: return "invalid_threading_command";
+        case ContinuousFaultReason::ThreadingRateChanged: return "threading_rate_changed";
+        case ContinuousFaultReason::ThreadingDecisionMismatch: return "threading_decision_mismatch";
+        case ContinuousFaultReason::ThreadingLostContinuousC: return "threading_lost_continuous_c";
     }
     return "unknown";
 }

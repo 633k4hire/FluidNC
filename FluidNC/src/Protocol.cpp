@@ -674,6 +674,8 @@ void protocol_do_motion_cancel() {
     // MOTION_CANCEL only occurs during a CYCLE, but a HOLD and SAFETY_DOOR may have been initiated
     // beforehand. Motion cancel affects only a single planner block motion, while jog cancel
     // will handle and clear multiple planner block motions.
+    Machine::Stepping::invalidateThreading();
+
     switch (sys.state()) {
         case State::Alarm:
         case State::ConfigAlarm:
@@ -712,6 +714,14 @@ void protocol_do_motion_cancel() {
 static void protocol_do_feedhold() {
     if (runLimitLoop) {
         runLimitLoop = false;  // Hack to stop show_limits()
+        return;
+    }
+    // A synchronized G33 pass is never resumable mid-thread. Convert hold to
+    // the existing decelerating motion-cancel path while continuous C remains
+    // owned by the spindle.
+    if (state_is(State::Cycle) && Machine::Stepping::threadingPassActive()) {
+        Machine::Stepping::invalidateThreading();
+        protocol_do_motion_cancel();
         return;
     }
     // log_debug("protocol_do_feedhold " << state_name());
@@ -977,6 +987,7 @@ void protocol_disable_steppers() {
 
 void protocol_do_cycle_stop() {
     // log_debug("protocol_do_cycle_stop " << state_name());
+    const bool threading_cancel = Machine::Stepping::takeThreadingInvalidated();
     protocol_disable_steppers();
 
     switch (sys.state()) {
@@ -1013,7 +1024,7 @@ void protocol_do_cycle_stop() {
         case State::Jog:
             // Motion complete. Includes CYCLE/JOG/HOMING states and jog cancel/motion cancel/soft limit events.
             // NOTE: Motion and jog cancel both immediately return to idle after the hold completes.
-            if (sys.suspend().bit.jogCancel) {  // For jog cancel, flush buffers and sync positions.
+            if (sys.suspend().bit.jogCancel || threading_cancel) {  // Invalidated G33 is also non-resumable.
                 sys.step_control = {};
                 plan_reset();
                 Stepper::resetPreservingContinuous();
@@ -1214,6 +1225,10 @@ static void protocol_exec_rt_suspend() {
 }
 
 static void protocol_do_feed_override(void* incrementvp) {
+    if (Machine::Stepping::threadingPassActive()) {
+        log_info("G33 feed override rejected");
+        return;
+    }
     int32_t increment = int((intptr_t)incrementvp);
     Percent percent;
     if (increment == FeedOverride::Default) {
@@ -1243,6 +1258,10 @@ static void protocol_do_rapid_override(void* percentvp) {
 }
 
 static void protocol_do_spindle_override(void* incrementvp) {
+    if (Machine::Stepping::threadingPassActive()) {
+        log_info("G33 spindle override rejected");
+        return;
+    }
     Percent percent;
     int32_t increment = intptr_t(incrementvp);
     if (increment == SpindleSpeedOverride::Default) {
